@@ -1,0 +1,374 @@
+%%%%%%%% ICML 2026 EXAMPLE LATEX SUBMISSION FILE %%%%%%%%%%%%%%%%%
+
+\documentclass{article}
+
+% Recommended, but optional, packages for figures and better typesetting:
+\usepackage{microtype}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{booktabs} % for professional tables
+\usepackage{longtable}
+\usepackage{siunitx}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+% hyperref makes hyperlinks in the resulting PDF.
+% If your build breaks (sometimes temporarily if a hyperlink spans a page)
+% please comment out the following usepackage line and replace
+% \usepackage{icml2026} with \usepackage[nohyperref]{icml2026} above.
+\usepackage{hyperref}
+
+
+% Attempt to make hyperref and algorithmic work together better:
+\newcommand{\theHalgorithm}{\arabic{algorithm}}
+
+% Use the following line for the initial blind version submitted for review:
+\usepackage{icml2026}
+
+% For preprint, use
+% \usepackage[preprint]{icml2026}
+
+% If accepted, instead use the following line for the camera-ready submission:
+% \usepackage[accepted]{icml2026}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{amsthm}
+
+
+% if you use cleveref..
+\usepackage[capitalize,noabbrev]{cleveref}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% THEOREMS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% Todonotes is useful during development; simply uncomment the next line
+%    and comment out the line below the next line to turn off comments
+%\usepackage[disable,textsize=tiny]{todonotes}
+\usepackage[textsize=tiny]{todonotes}
+
+% The \icmltitle you define below is probably too long as a header.
+% Therefore, a short form for the running title is supplied here:
+\icmltitlerunning{SPOCK: Scalable and Structure-Preserving Optimal Transport based Clustering with Kernel-density-estimation for Imperfect Multi-View Data}
+
+\begin{document}
+
+\twocolumn[
+  \icmltitle{SPOCK: Scalable and Structure-Preserving Optimal Transport based Clustering with Kernel-density-estimation for Imperfect Multi-View Data}
+
+  % It is OKAY to include author information, even for blind submissions: the
+  % style file will automatically remove it for you unless you've provided
+  % the [accepted] option to the icml2026 package.
+
+  % List of affiliations: The first argument should be a (short) identifier you
+  % will use later to specify author affiliations Academic affiliations
+  % should list Department, University, City, Region, Country Industry
+  % affiliations should list Company, City, Region, Country
+
+  % You can specify symbols, otherwise they are numbered in order. Ideally, you
+  % should not use this facility. Affiliations will be numbered in order of
+  % appearance and this is the preferred way.
+  \icmlsetsymbol{equal}{*}
+
+  \begin{icmlauthorlist}
+    \icmlauthor{Firstname1 Lastname1}{equal,yyy}
+    \icmlauthor{Firstname2 Lastname2}{equal,yyy,comp}
+    \icmlauthor{Firstname3 Lastname3}{comp}
+    \icmlauthor{Firstname4 Lastname4}{sch}
+    \icmlauthor{Firstname5 Lastname5}{yyy}
+    \icmlauthor{Firstname6 Lastname6}{sch,yyy,comp}
+    \icmlauthor{Firstname7 Lastname7}{comp}
+    %\icmlauthor{}{sch}
+    \icmlauthor{Firstname8 Lastname8}{sch}
+    \icmlauthor{Firstname8 Lastname8}{yyy,comp}
+    %\icmlauthor{}{sch}
+    %\icmlauthor{}{sch}
+  \end{icmlauthorlist}
+
+  \icmlaffiliation{yyy}{Department of XXX, University of YYY, Location, Country}
+  \icmlaffiliation{comp}{Company Name, Location, Country}
+  \icmlaffiliation{sch}{School of ZZZ, Institute of WWW, Location, Country}
+
+  \icmlcorrespondingauthor{Firstname1 Lastname1}{first1.last1@xxx.edu}
+  \icmlcorrespondingauthor{Firstname2 Lastname2}{first2.last2@www.uk}
+
+  % You may provide any keywords that you find helpful for describing your
+  % paper; these are used to populate the "keywords" metadata in the PDF but
+  % will not be shown in the document
+  \icmlkeywords{Machine Learning, ICML}
+
+  \vskip 0.3in
+]
+
+% this must go after the closing bracket ] following \twocolumn[ ...
+
+% This command actually creates the footnote in the first column listing the
+% affiliations and the copyright notice. The command takes one argument, which
+% is text to display at the start of the footnote. The \icmlEqualContribution
+% command is standard text for equal contribution. Remove it (just {}) if you
+% do not need this facility.
+
+% Use ONE of the following lines. DO NOT remove the command.
+
+% If you have no special notice, KEEP empty braces:
+\printAffiliationsAndNotice{}  % no special notice (required even if empty)
+% Or, if applicable, use the standard equal contribution text:
+% \printAffiliationsAndNotice{\icmlEqualContribution}
+
+
+\begin{abstract}
+
+We propose \textbf{SPOCK} (Scalable and Structure-Preserving Optimal Transport based Clustering with Kernel-density-estimation), a robust framework for clustering large-scale, incomplete, and unaligned multi-view data. Existing methods often suffer from quadratic or cubic computational complexity or rely on rigid assumptions about data quality. SPOCK addresses these challenges through a unified design philosophy: preserving and enhancing the intrinsic geometric structure of data while maintaining end-to-end near-linear complexity. The framework operates in three phases: 1) Unsupervised Structure-Preserving Sparse Feature Selection, which learns a denoised, informative feature subspace by preserving both local adjacency and local self-expression structures; 2) Scalable Density-Aware Graph Alignment, which utilizes Random Fourier Features (RFFs) to accelerate both Kernel Density Estimation (KDE) and Optimal Transport (OT), achieving $O(ND)$ complexity for density estimation and cross-view alignment; and 3) Scalable Final Clustering, employing Nyström approximation to perform spectral clustering in near-linear time. Experiments demonstrate SPOCK's superior scalability and performance compared to state-of-the-art methods, particularly in settings with missing or misaligned views.
+
+\end{abstract}
+
+\section{Introduction}\label{introduction}
+
+Multi-view learning has emerged as a powerful paradigm for analyzing
+complex data from multiple sources or modalities. However, real-world
+applications often present challenges such as high-dimensional feature
+spaces, unaligned views, and incomplete data, which hinder the
+effectiveness of traditional methods. While existing approaches like
+co-training, multiple kernel learning, and subspace learning have shown
+promise, they frequently suffer from scalability issues when dealing
+with sparse or misaligned views \cite{XuTaoXu2013}.
+
+Kernel density estimation (KDE) is a widely used non-parametric
+technique for estimating probability distributions, but its
+computational cost grows quadratically with dimensionality \cite{Wglarczyk2018}, which makes it impractical for high-dimensional
+multi-view data, where the number of required kernels becomes
+prohibitively large. Compressive sensing offers a potential solution by
+exploiting sparsity to approximate signals with fewer measurements
+\cite{Baraniuk2007}. Recent work has explored its application in
+multi-view learning, yet few methods explicitly address the dual
+challenges of scalability and adaptability in the presence of incomplete
+or unaligned views.
+
+To settle this problem, we propose a novel approach that integrates sparse feature selection
+with compressive KDE to overcome these limitations. Unlike existing
+methods such as TUMCR \cite{JiFengLi2024} or VITAL \cite{KimRenChartonHuothers2024}, which focus on adaptive learning or deep
+representation fusion, our method explicitly targets the
+computational bottleneck of density estimation in high dimensions. By
+identifying and retaining only the most informative features, we reduce
+the number of kernels required for KDE while preserving discriminative
+power. The sparse feature representations are then fused using a
+graph-based contrastive learning framework, which aligns views through
+optimal transport with entropy regularization. This not only mitigates
+the curse of dimensionality but also enhances robustness to missing or
+misaligned data.
+
+The main contributions of our work are as follows. First, we introduce a
+sparse compressive KDE framework that significantly reduces
+computational complexity while maintaining estimation accuracy. Second,
+we develop an adaptive kernel bandwidth selection mechanism that
+optimizes entropy per view, ensuring robustness to varying data
+densities. Third, we integrate these components into a scalable
+multi-view learning pipeline.
+% that outperforms state-of-the-art methods in both clustering and classification tasks.
+
+The remainder of this paper is organized as follows: Section 2 reviews
+related work in multi-view learning, KDE, and compressive sensing.
+Section 3 introduces the mathematical preliminaries of multi-view
+kernels, KDE, and compressive sensing. Section 4 details our method. Section 5
+presents experimental results on benchmark datasets, and Section 6
+discusses implications and future directions. Finally, Section 7
+concludes the paper.
+
+% Our approach builds on recent advances in sparse representation learning
+% and compressive sensing, but extends them to the multi-view setting with
+% a focus on scalability and adaptability. Unlike deep learning-based
+% methods such as MvCLN or GVMVC, which require extensive training data
+% and computational resources \cite{LiangWangNieLi2020},
+% \cite{GunionHaber2003}, our framework is lightweight and modular, making
+% it suitable for applications where data is scarce or computational
+% budgets are limited. By bridging the gap between sparse feature
+% selection and density estimation, we provide a principled solution to
+% the challenges of high-dimensional, unaligned, and incomplete multi-view
+% learning.
+
+\section{Related Work}\label{related-work}
+
+Multi-view learning has evolved through several paradigms. Early approaches focused on co-training and co-regularization \cite{Sun2013}. While effective for aligned views, these methods struggle with high-dimensional or incomplete data.
+
+\subsection{Structure-Preserving Feature Selection}
+Traditional feature selection often relies on variance maximization (e.g., PCA) or pseudo-labels. However, these can be fragile in unsupervised settings. Recent works like TGL \cite{11205298} have explored local structure preservation, but often incur high computational costs. Our approach integrates local adjacency and self-expression into a unified, scalable optimization problem.
+
+\subsection{Scalable Optimal Transport}
+Optimal Transport (OT) provides a robust framework for distribution alignment but suffers from $O(N^2)$ complexity. Recent advances using Sinkhorn iterations and random feature approximations have shown promise in reducing this cost. SPOCK leverages these advances by re-purposing RFFs for both density estimation and OT, achieving near-linear scalability.
+
+\subsection{Handling Unaligned and Incomplete Views}
+Graph-based methods \cite{YangLiHuBaiLvothers2022} and deep learning variants \cite{JinWangDongLiuothers2023} have been proposed to handle missing views. However, they often lack explicit density modeling or require extensive training. SPOCK addresses these issues through density-aware graph construction and entropy-regularized alignment.
+
+\section{Preliminaries}\label{preliminaries}
+
+\subsection{Kernel Density Estimation and RFF}
+KDE estimates the probability density function $p(\mathbf{x})$ from samples. To reduce the $O(N^2)$ cost, Random Fourier Features (RFFs) approximate the kernel function $K(\mathbf{x}, \mathbf{y}) \approx \phi(\mathbf{x})^\top \phi(\mathbf{y})$, reducing complexity to $O(ND)$.
+
+\subsection{Optimal Transport}
+Optimal Transport finds the most efficient way to transform one distribution to another. The entropy-regularized formulation allows for efficient computation using the Sinkhorn algorithm, which we further accelerate using RFFs.
+
+\section{SPOCK: Scalable and Structure-Preserving Optimal Transport based Clustering with Kernel-density-estimation for Imperfect Multi-View Data}\label{spock-methodology}
+
+The SPOCK framework addresses the computational challenges of high-dimensional multi-view learning through a three-phase pipeline: (1) Unsupervised Structure-Preserving Sparse Feature Selection, (2) Scalable Density-Aware Graph Alignment, and (3) Scalable Final Clustering.
+
+\begin{figure}
+\centering
+\fbox{%
+    \parbox{\linewidth}{\centering
+        \vspace{2.5cm}
+        \textbf{Placeholder: SPOCK workflow diagram}
+        \vspace{2.5cm}
+    }%
+}
+% \includegraphics[width=1\textwidth]{1.png}
+\caption{Workflow of SPOCK}
+\end{figure}
+
+\subsection{Phase 1: Unsupervised Structure-Preserving Sparse Feature Selection}\label{phase-1}
+
+The primary objective of this phase is to learn a robust, low-dimensional feature representation that preserves the intrinsic geometric structure of the data without relying on unreliable pseudo-labels or variance maximization assumptions. We posit that an optimal feature subspace should simultaneously respect the local manifold structure and the local subspace self-expressiveness of the original data.
+
+Let $\mathbf{X} \in \mathbb{R}^{N \times D}$ denote the input data matrix. To capture the local manifold structure, we first construct a $K$-nearest neighbor graph $G_n$ using an efficient Approximate Nearest Neighbor (ANN) algorithm. The adjacency matrix $\mathbf{A} \in \mathbb{R}^{N \times N}$ of $G_n$ encodes the local proximity, where $A_{ij} = 1$ if $\mathbf{x}_j$ is among the $K$ nearest neighbors of $\mathbf{x}_i$, and 0 otherwise. The preservation of this local structure in the projected space is enforced by minimizing the Laplacian regularization term:
+\[
+\mathcal{L}_{local}(\mathbf{P}) = \text{Tr}(\mathbf{P}^\top \mathbf{X}^\top \mathbf{L} \mathbf{X} \mathbf{P})
+\]
+where $\mathbf{P} \in \mathbb{R}^{D \times d}$ is the projection matrix, and $\mathbf{L} = \mathbf{D} - \mathbf{A}$ is the graph Laplacian with degree matrix $\mathbf{D}$.
+
+Simultaneously, to capture the local subspace structure, we adopt the concept of local self-expression. We assume that each data point can be linearly reconstructed by its neighbors in the feature space. This relationship is modeled by a coefficient matrix $\mathbf{S} \in \mathbb{R}^{N \times N}$, obtained by solving a localized sparse coding problem. The preservation of this self-expressive property in the low-dimensional space is achieved by minimizing the reconstruction error:
+\[
+\mathcal{L}_{global}(\mathbf{P}) = \|\mathbf{X}\mathbf{P} - \mathbf{S}\mathbf{X}\mathbf{P}\|_F^2
+\]
+This term ensures that the linear relationships defining the local subspaces in the original high-dimensional space are maintained after projection.
+
+To derive the optimal projection matrix $\mathbf{P}$ that selects the most informative features, we formulate a unified optimization problem that combines these structural constraints with an $\ell_{2,1}$-norm regularization to induce row-sparsity. The overall objective function is defined as:
+\[
+\min_{\mathbf{P}} \text{Tr}(\mathbf{P}^\top \mathbf{X}^\top \mathbf{L} \mathbf{X} \mathbf{P}) + \alpha \|\mathbf{X}\mathbf{P} - \mathbf{S}\mathbf{X}\mathbf{P}\|_F^2 + \lambda \|\mathbf{P}\|_{2,1}
+\]
+where $\alpha$ balances the two structural preservation terms, and $\lambda$ controls the sparsity of the feature selection. The $\ell_{2,1}$-norm, defined as $\|\mathbf{P}\|_{2,1} = \sum_{i=1}^D \|\mathbf{p}^i\|_2$, encourages entire rows of $\mathbf{P}$ to be zero, effectively selecting a subset of features. This optimization problem is solved efficiently using an iterative algorithm, and the use of ANN and localized computations ensures that the overall complexity remains near-linear with respect to the number of samples $N$. The result is a clean, structure-preserving feature representation $\tilde{\mathbf{X}} = \mathbf{X}\mathbf{P}$.
+
+\subsection{Phase 2: Density-Aware Graph Alignment}\label{phase-2}
+
+Building upon the structure-preserving features $\tilde{\mathbf{X}}$ obtained in Phase 1, the second phase focuses on constructing robust view-specific graphs and aligning them into a unified consensus graph. A major bottleneck in traditional approaches is the quadratic complexity associated with both kernel density estimation (KDE) and optimal transport (OT). We address this by leveraging Random Fourier Features (RFFs) to achieve near-linear scalability.
+
+First, to estimate the probability density function $\hat{p}(\mathbf{x})$ for each view, we bypass the computationally expensive standard KDE which requires $O(N^2)$ operations. Instead, we utilize Bochner's theorem to approximate the shift-invariant kernel $k(\mathbf{x}, \mathbf{y}) = \langle \phi(\mathbf{x}), \phi(\mathbf{y}) \rangle$ using an explicit feature map $\phi: \mathbb{R}^d \to \mathbb{R}^D$. The density estimate at a point $\mathbf{x}$ can then be reformulated as a linear operation:
+\begin{align*}
+\hat{p}(\mathbf{x}) 
+= & ~\frac{1}{N} \sum_{i=1}^N k(\mathbf{x}, \mathbf{x}_i)\\
+\approx & ~ \phi(\mathbf{x})^\top \left( \frac{1}{N} \sum_{i=1}^N \phi(\mathbf{x}_i) \right) \\
+= & ~ \phi(\mathbf{x})^\top \bar{\phi}
+\end{align*}
+where $\bar{\phi}$ is the mean feature vector. This reduces the complexity to $O(ND)$. Furthermore, to accommodate varying cluster densities, we adaptively determine the optimal kernel bandwidth $\sigma$ by maximizing the Shannon entropy of the estimated density, $H(\hat{p}) = -\mathbb{E}[\log \hat{p}(\mathbf{x})]$.
+
+With the estimated densities, we construct a robust similarity graph $\mathbf{G}^{(v)}$ for each view $v$. To filter out noise and outliers located in low-density regions, we apply a density-aware thresholding mechanism. The edge weight between nodes $i$ and $j$ is defined as:
+\[
+G_{ij}^{(v)} = k(\mathbf{x}_i, \mathbf{x}_j) \cdot \mathbb{I}(\hat{p}(\mathbf{x}_i) > \tau_v) \cdot \mathbb{I}(\hat{p}(\mathbf{x}_j) > \tau_v)
+\]
+where $\mathbb{I}(\cdot)$ is the indicator function and $\tau_v$ is a view-specific density threshold. This ensures that the graph structure is dominated by reliable, high-density connections.
+
+Finally, to align these view-specific graphs, we employ Optimal Transport (OT). Standard entropy-regularized OT involves solving for a transport plan $\mathbf{T}$ via the Sinkhorn-Knopp algorithm, which iteratively updates scaling vectors using the kernel matrix $\mathbf{K} = \exp(-\mathbf{C}/\epsilon)$, where $\mathbf{C}$ is the cost matrix. Since computing and storing $\mathbf{K}$ requires $O(N^2)$ time complexity, we creatively re-purpose the RFF mechanism. By approximating the Gibbs kernel $\mathbf{K}_{ij} \approx \psi(\mathbf{x}_i)^\top \psi(\mathbf{x}_j)$, the matrix-vector multiplications in the Sinkhorn iterations, $\mathbf{K}\mathbf{v}$, can be computed as $\mathbf{\Psi} (\mathbf{\Psi}^\top \mathbf{v})$ in $O(ND)$ time. This allows us to compute the optimal alignment plan efficiently, which is then used to fuse the individual graphs into a consensus graph $\mathbf{C}$ that encapsulates the shared structure across all views.
+
+\subsection{Phase 3: Final Clustering}\label{phase-3}
+
+The final phase aims to decode the cluster structure from the consensus graph $\mathbf{C}$ constructed in the previous phase. Standard spectral clustering requires performing eigenvalue decomposition on the graph Laplacian, which typically incurs a computational complexity of $O(N^3)$. This cubic scaling is prohibitive for large-scale datasets and would negate the efficiency gains achieved in the earlier phases. To maintain the overall near-linear complexity of our framework, we employ the Nyström method to approximate the spectral embedding.
+
+The Nyström method avoids the full decomposition by constructing a low-rank approximation of the affinity matrix using a subset of $M \ll N$ sampled landmark points. Let $\mathbf{W}$ be the affinity matrix derived from $\mathbf{C}$. We partition $\mathbf{W}$ based on the landmarks such that $\mathbf{C}_{NM} \in \mathbb{R}^{N \times M}$ represents the affinities between all $N$ points and the $M$ landmarks, and $\mathbf{W}_{MM} \in \mathbb{R}^{M \times M}$ represents the affinities among the landmarks themselves. The Nyström approximation reconstructs the full matrix as $\hat{\mathbf{W}} = \mathbf{C}_{NM} \mathbf{W}_{MM}^{-1} \mathbf{C}_{NM}^\top$. To obtain the spectral embedding, we compute the matrix $\mathbf{Q} = \mathbf{C}_{NM} \mathbf{W}_{MM}^{-1/2}$ and perform Singular Value Decomposition (SVD) on it, i.e., $\mathbf{Q} = \mathbf{U}\mathbf{\Sigma}\mathbf{V}^\top$. The approximate eigenvectors $\mathbf{Z} \in \mathbb{R}^{N \times K}$ are then given by:
+\[
+\mathbf{Z} = \mathbf{Q} \mathbf{V} \mathbf{\Sigma}^{-1} = \mathbf{U}
+\]
+This procedure reduces the time complexity to $O(NM^2)$, which is linear with respect to the sample size $N$.
+
+With the approximate spectral embedding $\mathbf{Z}$ formed by the top $K$ eigenvectors, we perform standard K-Means clustering. The rows of $\mathbf{Z}$ are treated as feature vectors, and K-Means partitions them into $K$ groups by minimizing the within-cluster sum of squares:
+\[
+\min_{\mathbf{Y}, \{\mathbf{\mu}_k\}} \sum_{i=1}^N \sum_{k=1}^K y_{ik} \|\mathbf{z}_i - \mathbf{\mu}_k\|_2^2
+\]
+where $y_{ik} \in \{0, 1\}$ indicates cluster assignment and $\mathbf{\mu}_k$ is the centroid of cluster $k$. This final step completes the SPOCK pipeline, delivering robust clustering results with high computational efficiency.
+
+\subsection{Overall Objective Function}\label{overall-objective}
+
+To unify the feature selection and structure learning phases into a coherent mathematical framework, we formulate a joint optimization problem. Our goal is to learn a projection matrix $\mathbf{P}$ that selects informative features while preserving both the local manifold structure (captured by the Laplacian $\mathbf{L}$) and the global subspace structure (captured by the self-expression coefficient matrix $\mathbf{S}$). Simultaneously, we seek to optimize $\mathbf{S}$ to be a sparse, valid graph representation. The overall objective function is defined as:
+\begin{equation}
+\begin{aligned}
+\min_{\mathbf{P}, \mathbf{S}} \mathcal{J}(\mathbf{P}, \mathbf{S}) = & ~ \|\mathbf{X}\mathbf{P} - \mathbf{S}\mathbf{X}\mathbf{P}\|_F^2 + \alpha \text{Tr}(\mathbf{P}^\top \mathbf{X}^\top \mathbf{L} \mathbf{X} \mathbf{P}) \\
+& + \lambda \|\mathbf{P}\|_{2,1} + \beta \|\mathbf{S}\|_1
+\end{aligned}
+\end{equation}
+subject to $\mathbf{P}^\top \mathbf{P} = \mathbf{I}$ and $\text{diag}(\mathbf{S}) = 0$. Here, the first term ensures self-expressiveness in the projected space, the second term enforces local smoothness, the third term induces row-sparsity for feature selection, and the fourth term promotes sparsity in the graph structure.
+
+\subsection{Optimization Procedure}\label{optimization-procedure}
+
+The objective function $\mathcal{J}(\mathbf{P}, \mathbf{S})$ is non-convex due to the coupling between $\mathbf{P}$ and $\mathbf{S}$ and the orthogonality constraint. We employ an Alternating Direction Method of Multipliers (ADMM) scheme to solve it efficiently by updating each variable iteratively while keeping the others fixed.
+
+\textbf{Step 1: Update $\mathbf{S}$ (Structure Learning).}
+Fixing $\mathbf{P}$, let $\mathbf{Z} = \mathbf{X}\mathbf{P}$. The sub-problem for $\mathbf{S}$ becomes a standard sparse coding problem:
+\[
+\min_{\mathbf{S}} \|\mathbf{Z} - \mathbf{S}\mathbf{Z}\|_F^2 + \beta \|\mathbf{S}\|_1, \quad \text{s.t. } \text{diag}(\mathbf{S}) = 0
+\]
+This can be solved using the Accelerated Proximal Gradient (APG) method or soft-thresholding operator.
+
+\textbf{Step 2: Update $\mathbf{P}$ (Feature Selection).}
+Fixing $\mathbf{S}$, the problem simplifies to a regularized trace minimization with an $\ell_{2,1}$-norm constraint. We introduce an auxiliary variable $\mathbf{Q}$ to decouple the non-smooth term. The augmented Lagrangian is:
+\begin{align*}
+\mathcal{L}_{\rho}(\mathbf{P}, \mathbf{Q}, \mathbf{Y}) = & ~ \text{Tr}(\mathbf{P}^\top \mathbf{M} \mathbf{P}) + \lambda \|\mathbf{Q}\|_{2,1} \\
+& + \langle \mathbf{Y}, \mathbf{P} - \mathbf{Q} \rangle + \frac{\rho}{2} \|\mathbf{P} - \mathbf{Q}\|_F^2
+\end{align*}
+where $\mathbf{M} = \mathbf{X}^\top (\mathbf{I} - \mathbf{S})^\top (\mathbf{I} - \mathbf{S}) \mathbf{X} + \alpha \mathbf{X}^\top \mathbf{L} \mathbf{X}$.
+The update for $\mathbf{P}$ involves solving a linear system $(2\mathbf{M} + \rho\mathbf{I})\mathbf{P} = \rho\mathbf{Q} - \mathbf{Y}$, and the update for $\mathbf{Q}$ uses the row-wise soft-thresholding operator.
+
+The complete procedure is summarized in Algorithm \ref{alg:spock}.
+
+\begin{algorithm}[tb]
+   \caption{SPOCK: Scalable Structure-Preserving Clustering}
+   \label{alg:spock}
+\begin{algorithmic}
+   \STATE {\bfseries Input:} Multi-view data $\{\mathbf{X}^{(v)}\}$, parameters $\alpha, \beta, \lambda, K$.
+   \STATE {\bfseries Output:} Cluster assignments.
+   \STATE \textbf{Phase 1: Feature Selection}
+   \STATE Construct KNN graphs and Laplacians $\mathbf{L}^{(v)}$.
+   \STATE Initialize $\mathbf{P}^{(v)}, \mathbf{S}^{(v)}$.
+   \REPEAT
+   \STATE Update $\mathbf{S}^{(v)}$ via sparse coding.
+   \STATE Update $\mathbf{P}^{(v)}$ via ADMM (solve for $\mathbf{P}, \mathbf{Q}, \mathbf{Y}$).
+   \UNTIL{convergence}
+   \STATE Compute projected features $\tilde{\mathbf{X}}^{(v)} = \mathbf{X}^{(v)}\mathbf{P}^{(v)}$.
+   \STATE \textbf{Phase 2: Graph Alignment}
+   \FOR{each view $v$}
+   \STATE Estimate density $\hat{p}^{(v)}$ using RFF.
+   \STATE Construct density-aware graph $\mathbf{G}^{(v)}$.
+   \ENDFOR
+   \STATE Align graphs to consensus $\mathbf{C}$ using RFF-Sinkhorn.
+   \STATE \textbf{Phase 3: Final Clustering}
+   \STATE Sample $M$ landmarks.
+   \STATE Compute Nyström approximation $\hat{\mathbf{W}}$.
+   \STATE Perform SVD on $\mathbf{Q} = \mathbf{C}_{NM} \mathbf{W}_{MM}^{-1/2}$ to get $\mathbf{Z}$.
+   \STATE Run K-Means on $\mathbf{Z}$.
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Complexity Analysis}\label{complexity-analysis}
+
+We provide a detailed complexity analysis of SPOCK to demonstrate its scalability to large-scale datasets. The computational cost is analyzed for each phase:
+
+\textbf{Phase 1: Feature Selection.} The construction of the approximate KNN graph takes $O(N \log N)$. In the ADMM optimization, the update of $\mathbf{S}$ is performed locally for each sample, costing $O(N K^3)$ where $K$ is the neighborhood size. The update of $\mathbf{P}$ involves matrix operations dominated by $O(N D^2)$ assuming $N > D$. Thus, the total complexity for $T_1$ iterations is $O(T_1 (N \log N + N D^2))$.
+
+\textbf{Phase 2: Graph Alignment.} Standard KDE and OT require $O(N^2)$ operations. By utilizing Random Fourier Features with dimension $D_{RFF}$, we reduce the density estimation cost to $O(N D_{RFF})$. Similarly, the RFF-based Sinkhorn algorithm reduces the cost of computing transport plans from $O(N^2)$ to $O(T_2 N D_{RFF})$, where $T_2$ is the number of Sinkhorn iterations.
+
+\textbf{Phase 3: Final Clustering.} Standard spectral clustering requires $O(N^3)$ for eigendecomposition. The Nyström approximation with $M$ landmarks ($M \ll N$) reduces the cost of constructing the low-rank matrix and performing SVD to $O(N M^2)$. The final K-Means step takes $O(T_3 N K M)$ where $K$ is the number of clusters.
+
+\textbf{Overall Complexity.} Summing these components, the overall time complexity of SPOCK is $O(N (D^2 + D_{RFF} + M^2))$, which is linear with respect to the number of samples $N$. This stands in sharp contrast to the $O(N^2)$ or $O(N^3)$ complexity of traditional multi-view clustering methods.
+
+\bibliography{ref}
+\bibliographystyle{icml2026}
+\end{document}
