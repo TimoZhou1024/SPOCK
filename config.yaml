@@ -1,0 +1,46 @@
+# SPOCK Configuration File
+
+# Dataset settings
+dataset:
+  name: "handwritten"  # Options: handwritten, caltech101-7, scene15, reuters, bbcsport
+  data_path: "./data"
+  missing_rate: 0.0  # Rate of missing views (0.0 - 1.0)
+
+# SPOCK hyperparameters
+spock:
+  # Phase 1: Feature Selection
+  alpha: 1.0          # Weight for self-expression term
+  beta: 0.1           # Sparsity weight for S
+  lambda_l21: 0.01    # L2,1 regularization weight for P
+  k_neighbors: 10     # Number of neighbors for KNN graph
+  proj_dim: 100       # Projected dimension d
+  phase1_max_iter: 50 # Maximum iterations for Phase 1
+  phase1_tol: 1e-4    # Convergence tolerance
+  rho: 1.0            # ADMM penalty parameter
+
+  # Phase 2: Graph Alignment
+  rff_dim: 256        # Random Fourier Features dimension
+  sigma: 1.0          # Kernel bandwidth (auto if -1)
+  density_percentile: 10  # Percentile for density threshold
+  sinkhorn_iter: 100  # Sinkhorn iterations
+  sinkhorn_reg: 0.1   # Entropy regularization
+
+  # Phase 3: Final Clustering
+  n_landmarks: 500    # Number of Nystrom landmarks
+  kmeans_init: "k-means++"
+
+# Experiment settings
+experiment:
+  n_runs: 10          # Number of runs for averaging
+  random_seed: 42
+  save_results: true
+  results_path: "./results"
+
+# Ablation study settings
+ablation:
+  components:
+    - "full"                  # Full SPOCK
+    - "no_feature_selection"  # Skip Phase 1
+    - "no_density_aware"      # No density thresholding
+    - "no_ot_alignment"       # Average instead of OT
+    - "standard_spectral"     # Full spectral instead of Nystrom
