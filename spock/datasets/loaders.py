@@ -6,7 +6,8 @@ Supports various benchmark datasets for multi-view clustering evaluation.
 
 import os
 import numpy as np
-from scipy.io import loadmat
+from scipy.io import loadmat, mmread
+from scipy.sparse import issparse
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 import urllib.request
 import zipfile
@@ -278,38 +279,122 @@ def load_reuters(data_path='./data'):
 
 def load_bbcsport(data_path='./data'):
     """
-    Load BBC Sport dataset.
+    Load BBC Sport dataset from MatrixMarket files.
     
-    2 views: text from 2 segments.
-    544 samples, 5 sports categories.
+    2 views: text from 2 segments (seg1of2, seg2of2).
+    544 samples, 5 sports categories (athletics, cricket, football, rugby, tennis).
+    
+    Data format:
+    - bbcsport_seg1of2.mtx, bbcsport_seg2of2.mtx: term-document sparse matrices
+    - bbcsport_seg1of2.docs, bbcsport_seg2of2.docs: document names
+    - bbcsport.clist: class labels (category: doc1, doc2, ...)
     """
     dataset = MultiViewDataset('BBCSport')
     
-    file_path = os.path.join(data_path, 'bbcsport.mat')
+    bbcsport_dir = os.path.join(data_path, 'bbcsport')
+    mat_file_path = os.path.join(data_path, 'bbcsport.mat')
     
-    if not os.path.exists(file_path):
-        print(f"Warning: {file_path} not found. Generating synthetic data.")
-        return _generate_synthetic_multiview(
-            n_samples=544, n_clusters=5, n_views=2,
-            view_dims=[3183, 3203], name='BBCSport'
-        )
+    # Try loading from MatrixMarket files first
+    if os.path.isdir(bbcsport_dir):
+        try:
+            # Load the two views (seg1of2 and seg2of2)
+            view1_mtx = os.path.join(bbcsport_dir, 'bbcsport_seg1of2.mtx')
+            view2_mtx = os.path.join(bbcsport_dir, 'bbcsport_seg2of2.mtx')
+            view1_docs = os.path.join(bbcsport_dir, 'bbcsport_seg1of2.docs')
+            view2_docs = os.path.join(bbcsport_dir, 'bbcsport_seg2of2.docs')
+            clist_file = os.path.join(bbcsport_dir, 'bbcsport.clist')
+            
+            if all(os.path.exists(f) for f in [view1_mtx, view2_mtx, view1_docs, view2_docs, clist_file]):
+                # Read sparse matrices (term x document) and transpose to (document x term)
+                X1 = mmread(view1_mtx).T.tocsr()  # (n_docs, n_terms)
+                X2 = mmread(view2_mtx).T.tocsr()
+                
+                # Read document names for each view
+                with open(view1_docs, 'r') as f:
+                    docs1 = [line.strip() for line in f if line.strip()]
+                with open(view2_docs, 'r') as f:
+                    docs2 = [line.strip() for line in f if line.strip()]
+                
+                # Parse class labels from clist file
+                # Format: "category: doc1,doc2,doc3,..."
+                doc_to_label = {}
+                label_names = []
+                with open(clist_file, 'r') as f:
+                    for label_idx, line in enumerate(f):
+                        line = line.strip()
+                        if ':' in line:
+                            category, doc_list = line.split(':', 1)
+                            category = category.strip()
+                            label_names.append(category)
+                            for doc in doc_list.split(','):
+                                doc = doc.strip()
+                                if doc:
+                                    doc_to_label[doc] = label_idx
+                
+                # Find common documents between views
+                common_docs = sorted(set(docs1) & set(docs2))
+                
+                if len(common_docs) == 0:
+                    raise ValueError("No common documents between views")
+                
+                # Create index mappings
+                docs1_idx = {doc: i for i, doc in enumerate(docs1)}
+                docs2_idx = {doc: i for i, doc in enumerate(docs2)}
+                
+                # Extract aligned samples
+                idx1 = [docs1_idx[doc] for doc in common_docs]
+                idx2 = [docs2_idx[doc] for doc in common_docs]
+                labels = np.array([doc_to_label.get(doc, -1) for doc in common_docs])
+                
+                # Filter out documents without labels
+                valid_mask = labels >= 0
+                idx1 = [idx1[i] for i in range(len(idx1)) if valid_mask[i]]
+                idx2 = [idx2[i] for i in range(len(idx2)) if valid_mask[i]]
+                labels = labels[valid_mask]
+                
+                # Extract view matrices
+                X1_aligned = X1[idx1].toarray() if issparse(X1) else X1[idx1]
+                X2_aligned = X2[idx2].toarray() if issparse(X2) else X2[idx2]
+                
+                dataset.views = [X1_aligned.astype(np.float64), X2_aligned.astype(np.float64)]
+                dataset.labels = labels.astype(int)
+                dataset.n_views = 2
+                dataset.n_samples = len(labels)
+                dataset.n_clusters = len(label_names)
+                
+                print(f"Loaded BBCSport: {dataset.n_samples} samples, {dataset.n_views} views, "
+                      f"{dataset.n_clusters} clusters, dims={[v.shape[1] for v in dataset.views]}")
+                
+                return dataset
+                
+        except Exception as e:
+            print(f"Warning: Failed to load BBCSport from MatrixMarket files: {e}")
     
-    data = loadmat(file_path)
+    # Fallback: try .mat file
+    if os.path.exists(mat_file_path):
+        data = loadmat(mat_file_path)
+        
+        if 'X' in data:
+            views = data['X'].flatten()
+            dataset.views = [np.array(v.toarray() if hasattr(v, 'toarray') else v) 
+                            for v in views]
+            dataset.labels = data['Y'].flatten().astype(int)
+        
+        if dataset.labels.min() == 1:
+            dataset.labels -= 1
+        
+        dataset.n_views = len(dataset.views)
+        dataset.n_samples = dataset.views[0].shape[0]
+        dataset.n_clusters = len(np.unique(dataset.labels))
+        
+        return dataset
     
-    if 'X' in data:
-        views = data['X'].flatten()
-        dataset.views = [np.array(v.toarray() if hasattr(v, 'toarray') else v) 
-                        for v in views]
-        dataset.labels = data['Y'].flatten().astype(int)
-    
-    if dataset.labels.min() == 1:
-        dataset.labels -= 1
-    
-    dataset.n_views = len(dataset.views)
-    dataset.n_samples = dataset.views[0].shape[0]
-    dataset.n_clusters = len(np.unique(dataset.labels))
-    
-    return dataset
+    # Final fallback: generate synthetic data
+    print(f"Warning: BBCSport data not found in {bbcsport_dir} or {mat_file_path}. Generating synthetic data.")
+    return _generate_synthetic_multiview(
+        n_samples=544, n_clusters=5, n_views=2,
+        view_dims=[3183, 3203], name='BBCSport'
+    )
 
 
 def load_msrcv1(data_path='./data'):
