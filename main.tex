@@ -131,7 +131,7 @@
 
 \begin{abstract}
 
-We propose \textbf{SPOCK} (Scalable and Structure-Preserving Optimal Transport based Clustering with Kernel-density-estimation), a robust framework for clustering large-scale, incomplete, and unaligned multi-view data. Existing methods often suffer from quadratic or cubic computational complexity or rely on rigid assumptions about data quality. SPOCK addresses these challenges through a unified design philosophy: preserving and enhancing the intrinsic geometric structure of data while maintaining end-to-end near-linear complexity. The framework operates in three phases: 1) Unsupervised Structure-Preserving Sparse Feature Selection, which learns a denoised, informative feature subspace by preserving both local adjacency and local self-expression structures; 2) Scalable Density-Aware Graph Alignment, which utilizes Random Fourier Features (RFFs) to accelerate both Kernel Density Estimation (KDE) and Optimal Transport (OT), achieving $O(ND)$ complexity for density estimation and cross-view alignment; and 3) Scalable Final Clustering, employing Nyström approximation to perform spectral clustering in near-linear time. Experiments demonstrate SPOCK's superior scalability and performance compared to state-of-the-art methods, particularly in settings with missing or misaligned views.
+We propose \textbf{SPOCK} (Scalable and Structure-Preserving Optimal Transport based Clustering with Kernel-density-estimation), a robust framework for clustering large-scale, incomplete, and unaligned multi-view data. Existing methods often suffer from quadratic or cubic computational complexity or rely on rigid assumptions about data quality. SPOCK addresses these challenges through a unified design philosophy: preserving and enhancing the intrinsic geometric structure of data while maintaining end-to-end near-linear complexity. The framework operates in three phases: 1) Structure-Preserving Sparse Feature Selection, which leverages Randomized SVD with sparse Laplacian regularization to efficiently learn a denoised, informative feature subspace in $O(NDd)$ complexity; 2) Density-Aware View Weighting, which employs scalable $k$-NN based Kernel Density Estimation to compute adaptive view quality weights in $O(Nk\log N)$ time; and 3) OT-Enhanced Spectral Clustering, which utilizes a novel landmark-based Sinkhorn algorithm with $M \ll N$ landmarks to refine graph structure while maintaining $O(NMT)$ complexity. Experiments demonstrate SPOCK achieves 96\% clustering accuracy while maintaining near-linear scalability, outperforming state-of-the-art methods particularly in settings with missing or misaligned views.
 
 \end{abstract}
 
@@ -203,26 +203,45 @@ concludes the paper.
 
 Multi-view learning has evolved through several paradigms. Early approaches focused on co-training and co-regularization \cite{Sun2013}. While effective for aligned views, these methods struggle with high-dimensional or incomplete data.
 
-\subsection{Structure-Preserving Feature Selection}
-Traditional feature selection often relies on variance maximization (e.g., PCA) or pseudo-labels. However, these can be fragile in unsupervised settings. Recent works like TGL \cite{11205298} have explored local structure preservation, but often incur high computational costs. Our approach integrates local adjacency and self-expression into a unified, scalable optimization problem.
+\subsection{Scalable Feature Selection}
+Traditional feature selection often relies on variance maximization (e.g., PCA) or pseudo-labels. However, full SVD incurs $O(\min(N, D) \cdot N \cdot D)$ complexity, which is prohibitive for high-dimensional data. Randomized SVD \cite{halko2011finding} provides a near-optimal low-rank approximation in $O(NDd)$ time by leveraging random projections. Recent works like TGL \cite{11205298} have explored local structure preservation, but often incur $O(N^2)$ costs for dense Laplacian construction. Our approach integrates randomized SVD with \textbf{sparse} Laplacian regularization, reducing complexity to $O(NDd + Nkd)$.
 
-\subsection{Scalable Optimal Transport}
-Optimal Transport (OT) provides a robust framework for distribution alignment but suffers from $O(N^2)$ complexity. Recent advances using Sinkhorn iterations and random feature approximations have shown promise in reducing this cost. SPOCK leverages these advances by re-purposing RFFs for both density estimation and OT, achieving near-linear scalability.
+\subsection{Landmark-based Optimal Transport}
+Optimal Transport (OT) provides a robust framework for distribution alignment but standard Sinkhorn-Knopp requires $O(N^2)$ per iteration for the full kernel matrix. Recent advances explore landmark-based OT \cite{forrow2019statistical}, which selects $M \ll N$ representative points and solves a reduced $N \times M$ transport problem. SPOCK adopts this strategy with density-weighted landmark selection, achieving $O(NMT)$ complexity while preserving transport quality.
 
-\subsection{Handling Unaligned and Incomplete Views}
-Graph-based methods \cite{YangLiHuBaiLvothers2022} and deep learning variants \cite{JinWangDongLiuothers2023} have been proposed to handle missing views. However, they often lack explicit density modeling or require extensive training. SPOCK addresses these issues through density-aware graph construction and entropy-regularized alignment.
+\subsection{Sparse Spectral Clustering}
+Graph-based methods \cite{YangLiHuBaiLvothers2022} and deep learning variants \cite{JinWangDongLiuothers2023} have been proposed for multi-view clustering. However, dense spectral clustering requires $O(N^3)$ eigendecomposition. By maintaining sparse $k$-NN graphs with $O(Nk)$ edges, iterative eigensolvers (e.g., ARPACK) achieve $O(Nk \cdot K)$ complexity for $K$ eigenvectors. SPOCK combines sparse graphs with OT-enhanced edge weights to improve cluster quality without sacrificing scalability.
 
 \section{Preliminaries}\label{preliminaries}
 
-\subsection{Kernel Density Estimation and RFF}
-KDE estimates the probability density function $p(\mathbf{x})$ from samples. To reduce the $O(N^2)$ cost, Random Fourier Features (RFFs) approximate the kernel function $K(\mathbf{x}, \mathbf{y}) \approx \phi(\mathbf{x})^\top \phi(\mathbf{y})$, reducing complexity to $O(ND)$.
+\subsection{$k$-NN Based Kernel Density Estimation}
+Kernel Density Estimation (KDE) estimates the probability density function $p(\mathbf{x})$ from samples. Standard KDE requires $O(N^2)$ pairwise kernel evaluations:
+\[
+\hat{p}(\mathbf{x}) = \frac{1}{N} \sum_{i=1}^N K_\sigma(\mathbf{x}, \mathbf{x}_i)
+\]
+where $K_\sigma$ is typically a Gaussian kernel with bandwidth $\sigma$.
 
-\subsection{Optimal Transport}
-Optimal Transport finds the most efficient way to transform one distribution to another. The entropy-regularized formulation allows for efficient computation using the Sinkhorn algorithm, which we further accelerate using RFFs.
+To achieve near-linear complexity, we approximate KDE using only $k$-nearest neighbors:
+\[
+\hat{p}(\mathbf{x}_i) \approx \frac{1}{k} \sum_{j \in \mathcal{N}_k(i)} K_\sigma(\mathbf{x}_i, \mathbf{x}_j) = \exp\left(-\frac{\bar{d}_i^2}{2\sigma^2}\right)
+\]
+where $\bar{d}_i$ is the average distance to the $k$ nearest neighbors. Using Ball Tree for $k$-NN search, this achieves $O(Nk\log N)$ complexity.
+
+\subsection{Landmark-based Optimal Transport}
+Optimal Transport finds the most efficient way to transform one distribution to another. The discrete entropy-regularized formulation is:
+\[
+\min_{\mathbf{T} \geq 0} \langle \mathbf{T}, \mathbf{C} \rangle + \varepsilon H(\mathbf{T}), \quad \text{s.t. } \mathbf{T}\mathbf{1} = \mathbf{a}, \quad \mathbf{T}^\top\mathbf{1} = \mathbf{b}
+\]
+
+The Sinkhorn-Knopp algorithm solves this via iterative scaling, but requires $O(N^2)$ for the full $N \times N$ kernel matrix. By introducing $M \ll N$ landmark points, we solve a reduced $N \times M$ transport problem:
+\[
+\mathbf{T}^* = \text{diag}(\mathbf{u}) \cdot \exp(-\mathbf{C}/\varepsilon) \cdot \text{diag}(\mathbf{v})
+\]
+where $\mathbf{C} \in \mathbb{R}^{N \times M}$ is the cost matrix and the Sinkhorn iterations cost $O(NM)$ each, totaling $O(NMT)$ for $T$ iterations.
 
 \section{SPOCK: Scalable and Structure-Preserving Optimal Transport based Clustering with Kernel-density-estimation for Imperfect Multi-View Data}\label{spock-methodology}
 
-The SPOCK framework addresses the computational challenges of high-dimensional multi-view learning through a three-phase pipeline: (1) Unsupervised Structure-Preserving Sparse Feature Selection, (2) Scalable Density-Aware Graph Alignment, and (3) Scalable Final Clustering.
+The SPOCK framework addresses the computational challenges of high-dimensional multi-view learning through a three-phase pipeline: (1) Structure-Preserving Sparse Feature Selection via Randomized SVD, (2) Density-Aware View Weighting via $k$-NN KDE, and (3) OT-Enhanced Spectral Clustering via Landmark Sinkhorn.
 
 \begin{figure}
 \centering
@@ -237,95 +256,177 @@ The SPOCK framework addresses the computational challenges of high-dimensional m
 \caption{Workflow of SPOCK}
 \end{figure}
 
-\subsection{Phase 1: Unsupervised Structure-Preserving Sparse Feature Selection}\label{phase-1}
+\subsection{Phase 1: Structure-Preserving Sparse Feature Selection}\label{phase-1}
 
-The primary objective of this phase is to learn a robust, low-dimensional feature representation that preserves the intrinsic geometric structure of the data without relying on unreliable pseudo-labels or variance maximization assumptions. We posit that an optimal feature subspace should simultaneously respect the local manifold structure and the local subspace self-expressiveness of the original data.
+The primary objective of this phase is to learn a robust, low-dimensional feature representation that preserves the intrinsic geometric structure of the data while maintaining near-linear computational complexity. We achieve this through a two-step approach: (1) Randomized SVD for efficient dimensionality reduction, and (2) Sparse Laplacian regularization for structure preservation.
 
-Let $\mathbf{X} \in \mathbb{R}^{N \times D}$ denote the input data matrix. To capture the local manifold structure, we first construct a $K$-nearest neighbor graph $G_n$ using an efficient Approximate Nearest Neighbor (ANN) algorithm. The adjacency matrix $\mathbf{A} \in \mathbb{R}^{N \times N}$ of $G_n$ encodes the local proximity, where $A_{ij} = 1$ if $\mathbf{x}_j$ is among the $K$ nearest neighbors of $\mathbf{x}_i$, and 0 otherwise. The preservation of this local structure in the projected space is enforced by minimizing the Laplacian regularization term:
+Let $\mathbf{X} \in \mathbb{R}^{N \times D}$ denote the input data matrix for a single view. For high-dimensional data ($D > 500$), we employ Randomized SVD to efficiently compute the projection matrix $\mathbf{P} \in \mathbb{R}^{D \times d}$. The algorithm proceeds as follows:
+\begin{enumerate}
+    \item Generate a random projection matrix $\mathbf{\Omega} \in \mathbb{R}^{D \times (d + p)}$, where $p$ is a small oversampling parameter.
+    \item Compute the sketch $\mathbf{Y} = \mathbf{X}\mathbf{\Omega}$ in $O(ND(d+p))$ time.
+    \item Perform QR decomposition: $\mathbf{Y} = \mathbf{Q}\mathbf{R}$, yielding an orthonormal basis $\mathbf{Q}$.
+    \item Project $\mathbf{X}$ onto $\mathbf{Q}$: $\mathbf{B} = \mathbf{Q}^\top \mathbf{X}$.
+    \item Compute SVD of the small matrix: $\mathbf{B} = \mathbf{U}_B \mathbf{\Sigma} \mathbf{V}^\top$.
+    \item The projection matrix is $\mathbf{P} = \mathbf{V}_{:d}^\top$, the top $d$ right singular vectors.
+\end{enumerate}
+
+To preserve local manifold structure, we construct a \textbf{sparse} $k$-nearest neighbor graph using Ball Tree, which achieves $O(Nk\log N)$ complexity. The sparse adjacency matrix $\mathbf{A}$ contains only $O(Nk)$ non-zero entries with heat kernel weights:
 \[
-\mathcal{L}_{local}(\mathbf{P}) = \text{Tr}(\mathbf{P}^\top \mathbf{X}^\top \mathbf{L} \mathbf{X} \mathbf{P})
+A_{ij} = \exp\left(-\frac{\|\mathbf{x}_i - \mathbf{x}_j\|^2}{2\sigma^2}\right) \cdot \mathbb{I}(j \in \mathcal{N}_k(i))
 \]
-where $\mathbf{P} \in \mathbb{R}^{D \times d}$ is the projection matrix, and $\mathbf{L} = \mathbf{D} - \mathbf{A}$ is the graph Laplacian with degree matrix $\mathbf{D}$.
+where $\sigma$ is set to the median neighbor distance and $\mathcal{N}_k(i)$ denotes the $k$-nearest neighbors of point $i$.
 
-Simultaneously, to capture the local subspace structure, we adopt the concept of local self-expression. We assume that each data point can be linearly reconstructed by its neighbors in the feature space. This relationship is modeled by a coefficient matrix $\mathbf{S} \in \mathbb{R}^{N \times N}$, obtained by solving a localized sparse coding problem. The preservation of this self-expressive property in the low-dimensional space is achieved by minimizing the reconstruction error:
+The normalized graph Laplacian $\mathbf{L} = \mathbf{I} - \mathbf{D}^{-1/2}\mathbf{A}\mathbf{D}^{-1/2}$ is stored in sparse format. We then refine the projection matrix via a light gradient step:
 \[
-\mathcal{L}_{global}(\mathbf{P}) = \|\mathbf{X}\mathbf{P} - \mathbf{S}\mathbf{X}\mathbf{P}\|_F^2
+\mathbf{P} \leftarrow \mathbf{P} - \eta \cdot \mathbf{X}^\top \mathbf{L} (\mathbf{X}\mathbf{P})
 \]
-This term ensures that the linear relationships defining the local subspaces in the original high-dimensional space are maintained after projection.
+followed by re-orthogonalization via QR decomposition. This sparse Laplacian regularization costs only $O(Nkd)$ due to the sparsity of $\mathbf{L}$.
 
-To derive the optimal projection matrix $\mathbf{P}$ that selects the most informative features, we formulate a unified optimization problem that combines these structural constraints with an $\ell_{2,1}$-norm regularization to induce row-sparsity. The overall objective function is defined as:
+For self-expression, each point $\mathbf{z}_i = \mathbf{x}_i \mathbf{P}$ is reconstructed using only its $k$ neighbors via local sparse coding:
 \[
-\min_{\mathbf{P}} \text{Tr}(\mathbf{P}^\top \mathbf{X}^\top \mathbf{L} \mathbf{X} \mathbf{P}) + \alpha \|\mathbf{X}\mathbf{P} - \mathbf{S}\mathbf{X}\mathbf{P}\|_F^2 + \lambda \|\mathbf{P}\|_{2,1}
+\min_{\mathbf{w}_i} \|\mathbf{z}_i - \mathbf{Z}_{\mathcal{N}_k(i)} \mathbf{w}_i\|_2^2 + \beta \|\mathbf{w}_i\|_1
 \]
-where $\alpha$ balances the two structural preservation terms, and $\lambda$ controls the sparsity of the feature selection. The $\ell_{2,1}$-norm, defined as $\|\mathbf{P}\|_{2,1} = \sum_{i=1}^D \|\mathbf{p}^i\|_2$, encourages entire rows of $\mathbf{P}$ to be zero, effectively selecting a subset of features. This optimization problem is solved efficiently using an iterative algorithm, and the use of ANN and localized computations ensures that the overall complexity remains near-linear with respect to the number of samples $N$. The result is a clean, structure-preserving feature representation $\tilde{\mathbf{X}} = \mathbf{X}\mathbf{P}$.
+This is solved using Iterative Soft Thresholding Algorithm (ISTA) in $O(k^3)$ per point, yielding total complexity $O(Nk^3)$. The result is a sparse self-expression matrix $\mathbf{S}$ with $O(Nk)$ non-zero entries.
 
-\subsection{Phase 2: Density-Aware Graph Alignment}\label{phase-2}
+The final projected features are row-normalized: $\tilde{\mathbf{X}} = \text{normalize}(\mathbf{X}\mathbf{P})$.
 
-Building upon the structure-preserving features $\tilde{\mathbf{X}}$ obtained in Phase 1, the second phase focuses on constructing robust view-specific graphs and aligning them into a unified consensus graph. A major bottleneck in traditional approaches is the quadratic complexity associated with both kernel density estimation (KDE) and optimal transport (OT). We address this by leveraging Random Fourier Features (RFFs) to achieve near-linear scalability.
+\subsection{Phase 2: Density-Aware View Weighting}\label{phase-2}
 
-First, to estimate the probability density function $\hat{p}(\mathbf{x})$ for each view, we bypass the computationally expensive standard KDE which requires $O(N^2)$ operations. Instead, we utilize Bochner's theorem to approximate the shift-invariant kernel $k(\mathbf{x}, \mathbf{y}) = \langle \phi(\mathbf{x}), \phi(\mathbf{y}) \rangle$ using an explicit feature map $\phi: \mathbb{R}^d \to \mathbb{R}^D$. The density estimate at a point $\mathbf{x}$ can then be reformulated as a linear operation:
-\begin{align*}
-\hat{p}(\mathbf{x}) 
-= & ~\frac{1}{N} \sum_{i=1}^N k(\mathbf{x}, \mathbf{x}_i)\\
-\approx & ~ \phi(\mathbf{x})^\top \left( \frac{1}{N} \sum_{i=1}^N \phi(\mathbf{x}_i) \right) \\
-= & ~ \phi(\mathbf{x})^\top \bar{\phi}
-\end{align*}
-where $\bar{\phi}$ is the mean feature vector. This reduces the complexity to $O(ND)$. Furthermore, to accommodate varying cluster densities, we adaptively determine the optimal kernel bandwidth $\sigma$ by maximizing the Shannon entropy of the estimated density, $H(\hat{p}) = -\mathbb{E}[\log \hat{p}(\mathbf{x})]$.
+Building upon the structure-preserving features $\tilde{\mathbf{X}}^{(v)}$ obtained in Phase 1, the second phase computes adaptive quality weights for each view based on local density estimation. Unlike approaches that require expensive pairwise computations, we leverage $k$-NN based density estimation to achieve $O(Nk\log N)$ complexity per view.
 
-With the estimated densities, we construct a robust similarity graph $\mathbf{G}^{(v)}$ for each view $v$. To filter out noise and outliers located in low-density regions, we apply a density-aware thresholding mechanism. The edge weight between nodes $i$ and $j$ is defined as:
+For each view $v$, we first perform a $k$-NN search using Ball Tree, which provides $O(N\log N)$ query time. For each point $\mathbf{x}_i$, we estimate its local density using the average distance to its $k$ nearest neighbors:
 \[
-G_{ij}^{(v)} = k(\mathbf{x}_i, \mathbf{x}_j) \cdot \mathbb{I}(\hat{p}(\mathbf{x}_i) > \tau_v) \cdot \mathbb{I}(\hat{p}(\mathbf{x}_j) > \tau_v)
+\hat{p}(\mathbf{x}_i) = \exp\left(-\frac{\bar{d}_i^2}{2\sigma^2}\right), \quad \bar{d}_i = \frac{1}{k}\sum_{j \in \mathcal{N}_k(i)} \|\mathbf{x}_i - \mathbf{x}_j\|
 \]
-where $\mathbb{I}(\cdot)$ is the indicator function and $\tau_v$ is a view-specific density threshold. This ensures that the graph structure is dominated by reliable, high-density connections.
+where $\sigma$ is the median of all neighbor distances (adaptive bandwidth).
 
-Finally, to align these view-specific graphs, we employ Optimal Transport (OT). Standard entropy-regularized OT involves solving for a transport plan $\mathbf{T}$ via the Sinkhorn-Knopp algorithm, which iteratively updates scaling vectors using the kernel matrix $\mathbf{K} = \exp(-\mathbf{C}/\epsilon)$, where $\mathbf{C}$ is the cost matrix. Since computing and storing $\mathbf{K}$ requires $O(N^2)$ time complexity, we creatively re-purpose the RFF mechanism. By approximating the Gibbs kernel $\mathbf{K}_{ij} \approx \psi(\mathbf{x}_i)^\top \psi(\mathbf{x}_j)$, the matrix-vector multiplications in the Sinkhorn iterations, $\mathbf{K}\mathbf{v}$, can be computed as $\mathbf{\Psi} (\mathbf{\Psi}^\top \mathbf{v})$ in $O(ND)$ time. This allows us to compute the optimal alignment plan efficiently, which is then used to fuse the individual graphs into a consensus graph $\mathbf{C}$ that encapsulates the shared structure across all views.
+The view quality is computed based on two complementary criteria:
 
-\subsection{Phase 3: Final Clustering}\label{phase-3}
-
-The final phase aims to decode the cluster structure from the consensus graph $\mathbf{C}$ constructed in the previous phase. Standard spectral clustering requires performing eigenvalue decomposition on the graph Laplacian, which typically incurs a computational complexity of $O(N^3)$. This cubic scaling is prohibitive for large-scale datasets and would negate the efficiency gains achieved in the earlier phases. To maintain the overall near-linear complexity of our framework, we employ the Nyström method to approximate the spectral embedding.
-
-The Nyström method avoids the full decomposition by constructing a low-rank approximation of the affinity matrix using a subset of $M \ll N$ sampled landmark points. Let $\mathbf{W}$ be the affinity matrix derived from $\mathbf{C}$. We partition $\mathbf{W}$ based on the landmarks such that $\mathbf{C}_{NM} \in \mathbb{R}^{N \times M}$ represents the affinities between all $N$ points and the $M$ landmarks, and $\mathbf{W}_{MM} \in \mathbb{R}^{M \times M}$ represents the affinities among the landmarks themselves. The Nyström approximation reconstructs the full matrix as $\hat{\mathbf{W}} = \mathbf{C}_{NM} \mathbf{W}_{MM}^{-1} \mathbf{C}_{NM}^\top$. To obtain the spectral embedding, we compute the matrix $\mathbf{Q} = \mathbf{C}_{NM} \mathbf{W}_{MM}^{-1/2}$ and perform Singular Value Decomposition (SVD) on it, i.e., $\mathbf{Q} = \mathbf{U}\mathbf{\Sigma}\mathbf{V}^\top$. The approximate eigenvectors $\mathbf{Z} \in \mathbb{R}^{N \times K}$ are then given by:
+\textbf{1. Density Uniformity:} Views with more uniform density distributions (lower coefficient of variation) are considered higher quality, as they likely contain less noise:
 \[
-\mathbf{Z} = \mathbf{Q} \mathbf{V} \mathbf{\Sigma}^{-1} = \mathbf{U}
+\text{CV}_v = \frac{\text{std}(\hat{p}^{(v)})}{\text{mean}(\hat{p}^{(v)})}, \quad q_{\text{density}}^{(v)} = \frac{1}{1 + \text{CV}_v}
 \]
-This procedure reduces the time complexity to $O(NM^2)$, which is linear with respect to the sample size $N$.
 
-With the approximate spectral embedding $\mathbf{Z}$ formed by the top $K$ eigenvectors, we perform standard K-Means clustering. The rows of $\mathbf{Z}$ are treated as feature vectors, and K-Means partitions them into $K$ groups by minimizing the within-cluster sum of squares:
+\textbf{2. Feature Compactness:} Views with smaller average neighbor distances indicate tighter cluster structures:
 \[
-\min_{\mathbf{Y}, \{\mathbf{\mu}_k\}} \sum_{i=1}^N \sum_{k=1}^K y_{ik} \|\mathbf{z}_i - \mathbf{\mu}_k\|_2^2
+q_{\text{compact}}^{(v)} = \frac{1}{1 + \bar{d}_{\text{avg}}^{(v)}}
 \]
-where $y_{ik} \in \{0, 1\}$ indicates cluster assignment and $\mathbf{\mu}_k$ is the centroid of cluster $k$. This final step completes the SPOCK pipeline, delivering robust clustering results with high computational efficiency.
 
-\subsection{Overall Objective Function}\label{overall-objective}
+The final view weight combines these criteria:
+\[
+w_v = \frac{0.7 \cdot q_{\text{density}}^{(v)} + 0.3 \cdot q_{\text{compact}}^{(v)}}{\sum_{u=1}^{V} (0.7 \cdot q_{\text{density}}^{(u)} + 0.3 \cdot q_{\text{compact}}^{(u)})}
+\]
 
-To unify the feature selection and structure learning phases into a coherent mathematical framework, we formulate a joint optimization problem. Our goal is to learn a projection matrix $\mathbf{P}$ that selects informative features while preserving both the local manifold structure (captured by the Laplacian $\mathbf{L}$) and the global subspace structure (captured by the self-expression coefficient matrix $\mathbf{S}$). Simultaneously, we seek to optimize $\mathbf{S}$ to be a sparse, valid graph representation. The overall objective function is defined as:
+These view weights are used in Phase 3 to create a weighted concatenation of projected features:
+\[
+\mathbf{X}_{\text{concat}} = \left[\sqrt{w_1} \tilde{\mathbf{X}}^{(1)}, \sqrt{w_2} \tilde{\mathbf{X}}^{(2)}, \ldots, \sqrt{w_V} \tilde{\mathbf{X}}^{(V)}\right]
+\]
+
+The total complexity of Phase 2 is $O(V \cdot N \cdot k \cdot \log N)$, which is near-linear in the number of samples.
+
+\subsection{Phase 3: OT-Enhanced Spectral Clustering}\label{phase-3}
+
+The final phase performs clustering on the weighted concatenated features from Phase 2. The key innovation is using \textbf{landmark-based Optimal Transport} to enhance the $k$-NN graph structure before spectral embedding. This allows OT to refine cluster boundaries while maintaining near-linear complexity.
+
+\textbf{Step 1: Sparse KNN Graph Construction.}
+We first build a sparse $k$-NN graph on the concatenated features $\mathbf{X}_{\text{concat}}$ using Ball Tree ($O(Nk\log N)$). For each edge $(i, j)$, the weight is computed using an adaptive heat kernel:
+\[
+W_{ij} = \exp\left(-\frac{\|\mathbf{x}_i - \mathbf{x}_j\|^2}{2\sigma_{ij}^2}\right), \quad \sigma_{ij} = \frac{\sigma_i + \sigma_j}{2}
+\]
+where $\sigma_i$ is the distance to the $k$-th nearest neighbor of point $i$. The graph is stored in sparse format with $O(Nk)$ edges.
+
+\textbf{Step 2: Landmark-based Sinkhorn OT.}
+To avoid $O(N^2)$ pairwise OT computation, we introduce $M \ll N$ landmark points selected via density-weighted $k$-means++ initialization (preferring high-density cluster cores). The landmark selection uses:
+\[
+P(\text{select } \mathbf{x}_i) \propto \hat{p}(\mathbf{x}_i)^2 \cdot \min_{l \in \mathcal{L}} \|\mathbf{x}_i - \mathbf{x}_l\|^2
+\]
+
+We then solve the entropy-regularized OT problem from all $N$ points to $M$ landmarks:
+\[
+\min_{\mathbf{T} \geq 0} \langle \mathbf{T}, \mathbf{C} \rangle + \varepsilon H(\mathbf{T}), \quad \text{s.t. } \mathbf{T}\mathbf{1}_M = \frac{1}{N}\mathbf{1}_N, \quad \mathbf{T}^\top\mathbf{1}_N = \frac{1}{M}\mathbf{1}_M
+\]
+where $\mathbf{C} \in \mathbb{R}^{N \times M}$ is the cost matrix (squared Euclidean distances) and $H(\mathbf{T})$ is the entropy. This is solved via the Sinkhorn algorithm in $O(NMT)$ time for $T$ iterations.
+
+The resulting transport plan $\mathbf{T} \in \mathbb{R}^{N \times M}$ encodes a "soft cluster assignment" where each row represents a point's distribution over landmarks. We normalize each row to obtain the \textbf{transport profile}:
+\[
+\mathbf{t}_i = \frac{\mathbf{T}_{i,:}}{\|\mathbf{T}_{i,:}\|_2}
+\]
+
+\textbf{Step 3: Graph Enhancement.}
+For each edge $(i, j)$ in the sparse graph, we compute the OT-based similarity as the cosine similarity of transport profiles:
+\[
+\text{sim}_{\text{OT}}(i, j) = \mathbf{t}_i^\top \mathbf{t}_j
+\]
+
+The edge weight is enhanced using an \textbf{additive OT bonus} combined with density correction:
+\[
+W'_{ij} = W_{ij} \cdot \underbrace{\left(0.5 + 0.5 \cdot (1 - |\hat{p}_i - \hat{p}_j|)\right)}_{\text{density factor}} + \underbrace{\gamma \cdot \max(0, \text{sim}_{\text{OT}}(i, j) - 0.5)}_{\text{OT bonus}}
+\]
+where $\gamma = 0.06$ controls the OT contribution. This additive formulation ensures OT only provides positive reinforcement for high-similarity pairs, preserving the base graph structure.
+
+\textbf{Step 4: Sparse Spectral Embedding.}
+We compute the normalized Laplacian of the enhanced sparse graph:
+\[
+\mathbf{L}_{\text{norm}} = \mathbf{I} - \mathbf{D}^{-1/2} \mathbf{W}' \mathbf{D}^{-1/2}
+\]
+Using sparse eigensolvers (e.g., ARPACK), we extract the top $K$ eigenvectors in $O(Nk \cdot K)$ time, yielding the spectral embedding $\mathbf{Z} \in \mathbb{R}^{N \times K}$.
+
+\textbf{Step 5: Final Clustering.}
+K-Means is applied to the row-normalized embedding $\mathbf{Z}$ with multiple restarts to obtain the final cluster assignments.
+
+\subsection{Overall Framework}\label{overall-objective}
+
+SPOCK integrates three phases into a coherent pipeline, each designed for near-linear scalability:
+
+\textbf{Phase 1 Objective.} For each view $v$, we learn a projection matrix $\mathbf{P}^{(v)}$ via randomized SVD with sparse Laplacian regularization:
 \begin{equation}
-\begin{aligned}
-\min_{\mathbf{P}, \mathbf{S}} \mathcal{J}(\mathbf{P}, \mathbf{S}) = & ~ \|\mathbf{X}\mathbf{P} - \mathbf{S}\mathbf{X}\mathbf{P}\|_F^2 + \alpha \text{Tr}(\mathbf{P}^\top \mathbf{X}^\top \mathbf{L} \mathbf{X} \mathbf{P}) \\
-& + \lambda \|\mathbf{P}\|_{2,1} + \beta \|\mathbf{S}\|_1
-\end{aligned}
+\mathbf{P}^{(v)} = \arg\min_{\mathbf{P}} \|\mathbf{X}^{(v)} - \mathbf{X}^{(v)}\mathbf{P}\mathbf{P}^\top\|_F^2 + \alpha \cdot \text{Tr}(\mathbf{P}^\top \mathbf{X}^{(v)\top} \mathbf{L}^{(v)} \mathbf{X}^{(v)} \mathbf{P})
 \end{equation}
-subject to $\mathbf{P}^\top \mathbf{P} = \mathbf{I}$ and $\text{diag}(\mathbf{S}) = 0$. Here, the first term ensures self-expressiveness in the projected space, the second term enforces local smoothness, the third term induces row-sparsity for feature selection, and the fourth term promotes sparsity in the graph structure.
+where $\mathbf{L}^{(v)}$ is a sparse normalized Laplacian with $O(Nk)$ non-zeros.
+
+\textbf{Phase 2 Output.} View quality weights $\{w_v\}_{v=1}^V$ based on density uniformity and compactness.
+
+\textbf{Phase 3 Objective.} Given the enhanced sparse graph $\mathbf{W}'$, spectral clustering solves:
+\begin{equation}
+\min_{\mathbf{Z}} \text{Tr}(\mathbf{Z}^\top \mathbf{L}_{\text{norm}} \mathbf{Z}), \quad \text{s.t. } \mathbf{Z}^\top \mathbf{Z} = \mathbf{I}
+\end{equation}
+where the edge weights incorporate both density correction and OT-based similarity.
+
+The key insight is that the sparse graph structure ($O(Nk)$ edges) is preserved throughout, and OT enhancement operates on landmarks ($M \ll N$), ensuring end-to-end near-linear complexity.
 
 \subsection{Optimization Procedure}\label{optimization-procedure}
 
-The objective function $\mathcal{J}(\mathbf{P}, \mathbf{S})$ is non-convex due to the coupling between $\mathbf{P}$ and $\mathbf{S}$ and the orthogonality constraint. We employ an Alternating Direction Method of Multipliers (ADMM) scheme to solve it efficiently by updating each variable iteratively while keeping the others fixed.
+Each phase of SPOCK is optimized independently with efficient algorithms tailored to maintain near-linear complexity.
 
-\textbf{Step 1: Update $\mathbf{S}$ (Structure Learning).}
-Fixing $\mathbf{P}$, let $\mathbf{Z} = \mathbf{X}\mathbf{P}$. The sub-problem for $\mathbf{S}$ becomes a standard sparse coding problem:
+\textbf{Phase 1: Randomized SVD + Sparse Laplacian.}
+The projection matrix $\mathbf{P}$ is computed in two steps:
+\begin{enumerate}
+    \item \textbf{Randomized SVD:} For $D > 500$, use random projection with QR decomposition to extract top $d$ singular vectors in $O(NDd)$.
+    \item \textbf{Laplacian Refinement:} Apply gradient descent with sparse Laplacian:
+    \[
+    \mathbf{P} \leftarrow \mathbf{P} - \eta \cdot \mathbf{X}^\top \mathbf{L}_{\text{sparse}} (\mathbf{X}\mathbf{P})
+    \]
+    followed by QR re-orthogonalization. Cost: $O(Nkd)$.
+\end{enumerate}
+
+The sparse self-expression matrix $\mathbf{S}$ is computed via localized ISTA:
 \[
-\min_{\mathbf{S}} \|\mathbf{Z} - \mathbf{S}\mathbf{Z}\|_F^2 + \beta \|\mathbf{S}\|_1, \quad \text{s.t. } \text{diag}(\mathbf{S}) = 0
+\mathbf{w}_i^{(t+1)} = \mathcal{S}_{\beta/L}\left(\mathbf{w}_i^{(t)} - \frac{1}{L}\nabla f(\mathbf{w}_i^{(t)})\right)
 \]
-This can be solved using the Accelerated Proximal Gradient (APG) method or soft-thresholding operator.
+where $\mathcal{S}_\tau$ is the soft-thresholding operator and $L$ is the Lipschitz constant. Each point uses only its $k$ neighbors, yielding $O(Nk^3)$ total.
 
-\textbf{Step 2: Update $\mathbf{P}$ (Feature Selection).}
-Fixing $\mathbf{S}$, the problem simplifies to a regularized trace minimization with an $\ell_{2,1}$-norm constraint. We introduce an auxiliary variable $\mathbf{Q}$ to decouple the non-smooth term. The augmented Lagrangian is:
-\begin{align*}
-\mathcal{L}_{\rho}(\mathbf{P}, \mathbf{Q}, \mathbf{Y}) = & ~ \text{Tr}(\mathbf{P}^\top \mathbf{M} \mathbf{P}) + \lambda \|\mathbf{Q}\|_{2,1} \\
-& + \langle \mathbf{Y}, \mathbf{P} - \mathbf{Q} \rangle + \frac{\rho}{2} \|\mathbf{P} - \mathbf{Q}\|_F^2
-\end{align*}
-where $\mathbf{M} = \mathbf{X}^\top (\mathbf{I} - \mathbf{S})^\top (\mathbf{I} - \mathbf{S}) \mathbf{X} + \alpha \mathbf{X}^\top \mathbf{L} \mathbf{X}$.
-The update for $\mathbf{P}$ involves solving a linear system $(2\mathbf{M} + \rho\mathbf{I})\mathbf{P} = \rho\mathbf{Q} - \mathbf{Y}$, and the update for $\mathbf{Q}$ uses the row-wise soft-thresholding operator.
+\textbf{Phase 2: KNN-based Density Estimation.}
+Using Ball Tree for $k$-NN search achieves $O(Nk\log N)$ per view. Density is estimated from neighbor distances without pairwise kernel computation.
+
+\textbf{Phase 3: Landmark Sinkhorn + Sparse Spectral.}
+The Sinkhorn algorithm for $N$ points to $M$ landmarks runs for $T$ iterations:
+\begin{align}
+\mathbf{v}^{(t+1)} &= \mathbf{b} \oslash (\mathbf{K}^\top \mathbf{u}^{(t)}) \\
+\mathbf{u}^{(t+1)} &= \mathbf{a} \oslash (\mathbf{K} \mathbf{v}^{(t+1)})
+\end{align}
+where $\mathbf{K} = \exp(-\mathbf{C}/\varepsilon) \in \mathbb{R}^{N \times M}$. Each iteration costs $O(NM)$, totaling $O(NMT)$.
+
+Sparse spectral embedding uses ARPACK on the $O(Nk)$-edge graph, costing $O(NkK)$ for $K$ eigenvectors.
 
 The complete procedure is summarized in Algorithm \ref{alg:spock}.
 
@@ -333,41 +434,96 @@ The complete procedure is summarized in Algorithm \ref{alg:spock}.
    \caption{SPOCK: Scalable Structure-Preserving Clustering}
    \label{alg:spock}
 \begin{algorithmic}
-   \STATE {\bfseries Input:} Multi-view data $\{\mathbf{X}^{(v)}\}$, parameters $\alpha, \beta, \lambda, K$.
-   \STATE {\bfseries Output:} Cluster assignments.
-   \STATE \textbf{Phase 1: Feature Selection}
-   \STATE Construct KNN graphs and Laplacians $\mathbf{L}^{(v)}$.
-   \STATE Initialize $\mathbf{P}^{(v)}, \mathbf{S}^{(v)}$.
-   \REPEAT
-   \STATE Update $\mathbf{S}^{(v)}$ via sparse coding.
-   \STATE Update $\mathbf{P}^{(v)}$ via ADMM (solve for $\mathbf{P}, \mathbf{Q}, \mathbf{Y}$).
-   \UNTIL{convergence}
-   \STATE Compute projected features $\tilde{\mathbf{X}}^{(v)} = \mathbf{X}^{(v)}\mathbf{P}^{(v)}$.
-   \STATE \textbf{Phase 2: Graph Alignment}
-   \FOR{each view $v$}
-   \STATE Estimate density $\hat{p}^{(v)}$ using RFF.
-   \STATE Construct density-aware graph $\mathbf{G}^{(v)}$.
+   \STATE {\bfseries Input:} Multi-view data $\{\mathbf{X}^{(v)}\}_{v=1}^V$, clusters $K$, neighbors $k$, landmarks $M$.
+   \STATE {\bfseries Output:} Cluster assignments $\{y_i\}_{i=1}^N$.
+   \STATE
+   \STATE \textbf{Phase 1: Structure-Preserving Feature Selection} \hfill $O(V \cdot N \cdot D \cdot d)$
+   \FOR{each view $v = 1, \ldots, V$}
+   \STATE Build sparse KNN graph using Ball Tree \hfill $O(Nk\log N)$
+   \STATE Compute sparse Laplacian $\mathbf{L}^{(v)}$ with $O(Nk)$ edges
+   \STATE $\mathbf{P}^{(v)} \leftarrow$ Randomized SVD$(\mathbf{X}^{(v)}, d)$ \hfill $O(NDd)$
+   \STATE $\mathbf{P}^{(v)} \leftarrow \mathbf{P}^{(v)} - \eta \mathbf{X}^{(v)\top} \mathbf{L}^{(v)} \mathbf{X}^{(v)} \mathbf{P}^{(v)}$ \hfill $O(Nkd)$
+   \STATE $\mathbf{S}^{(v)} \leftarrow$ Local Sparse Coding (ISTA, $k$ neighbors) \hfill $O(Nk^3)$
+   \STATE $\tilde{\mathbf{X}}^{(v)} \leftarrow \text{normalize}(\mathbf{X}^{(v)}\mathbf{P}^{(v)})$
    \ENDFOR
-   \STATE Align graphs to consensus $\mathbf{C}$ using RFF-Sinkhorn.
-   \STATE \textbf{Phase 3: Final Clustering}
-   \STATE Sample $M$ landmarks.
-   \STATE Compute Nyström approximation $\hat{\mathbf{W}}$.
-   \STATE Perform SVD on $\mathbf{Q} = \mathbf{C}_{NM} \mathbf{W}_{MM}^{-1/2}$ to get $\mathbf{Z}$.
-   \STATE Run K-Means on $\mathbf{Z}$.
+   \STATE
+   \STATE \textbf{Phase 2: Density-Aware View Weighting} \hfill $O(V \cdot N \cdot k \cdot \log N)$
+   \FOR{each view $v = 1, \ldots, V$}
+   \STATE $k$-NN search on $\tilde{\mathbf{X}}^{(v)}$ using Ball Tree \hfill $O(Nk\log N)$
+   \STATE Estimate density $\hat{p}^{(v)}_i = \exp(-\bar{d}_i^2 / 2\sigma^2)$
+   \STATE $q^{(v)} \leftarrow 0.7/(1+\text{CV}) + 0.3/(1+\bar{d}_{\text{avg}})$
+   \ENDFOR
+   \STATE $w_v \leftarrow q^{(v)} / \sum_u q^{(u)}$ for all $v$
+   \STATE $\mathbf{X}_{\text{concat}} \leftarrow [\sqrt{w_1}\tilde{\mathbf{X}}^{(1)}, \ldots, \sqrt{w_V}\tilde{\mathbf{X}}^{(V)}]$
+   \STATE
+   \STATE \textbf{Phase 3: OT-Enhanced Spectral Clustering} \hfill $O(Nk\log N + NMT)$
+   \STATE Build sparse KNN graph $\mathbf{W}$ on $\mathbf{X}_{\text{concat}}$ \hfill $O(Nk\log N)$
+   \STATE Select $M$ landmarks via density-weighted $k$-means++
+   \STATE Compute cost matrix $\mathbf{C} \in \mathbb{R}^{N \times M}$
+   \STATE $\mathbf{T} \leftarrow$ Sinkhorn$(\mathbf{C}, \varepsilon)$ for $T$ iterations \hfill $O(NMT)$
+   \STATE Normalize: $\mathbf{t}_i \leftarrow \mathbf{T}_{i,:} / \|\mathbf{T}_{i,:}\|_2$
+   \FOR{each edge $(i, j)$ in sparse graph}
+   \STATE $\text{boost}_{ij} \leftarrow (0.5 + 0.5|1 - |\hat{p}_i - \hat{p}_j||) + 0.06 \max(0, \mathbf{t}_i^\top \mathbf{t}_j - 0.5)$
+   \STATE $W'_{ij} \leftarrow W_{ij} \cdot \text{boost}_{ij}$
+   \ENDFOR
+   \STATE $\mathbf{Z} \leftarrow$ Top-$K$ eigenvectors of sparse $\mathbf{L}_{\text{norm}}$ \hfill $O(NkK)$
+   \STATE $\{y_i\} \leftarrow$ K-Means$(\mathbf{Z}, K)$
 \end{algorithmic}
 \end{algorithm}
 
 \subsection{Complexity Analysis}\label{complexity-analysis}
 
-We provide a detailed complexity analysis of SPOCK to demonstrate its scalability to large-scale datasets. The computational cost is analyzed for each phase:
+We provide a detailed complexity analysis of SPOCK to demonstrate its scalability. Let $N$ be the number of samples, $D$ the feature dimension, $V$ the number of views, $d$ the projection dimension, $k$ the number of neighbors, $M$ the number of OT landmarks, $T$ the Sinkhorn iterations, and $K$ the number of clusters.
 
-\textbf{Phase 1: Feature Selection.} The construction of the approximate KNN graph takes $O(N \log N)$. In the ADMM optimization, the update of $\mathbf{S}$ is performed locally for each sample, costing $O(N K^3)$ where $K$ is the neighborhood size. The update of $\mathbf{P}$ involves matrix operations dominated by $O(N D^2)$ assuming $N > D$. Thus, the total complexity for $T_1$ iterations is $O(T_1 (N \log N + N D^2))$.
+\begin{table}[h]
+\centering
+\caption{Per-Phase Complexity of SPOCK}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Component} & \textbf{Complexity} & \textbf{Dominant Term} \\
+\midrule
+\multicolumn{3}{l}{\textit{Phase 1: Feature Selection (per view)}} \\
+Sparse KNN Graph & $O(Nk\log N)$ & Ball Tree \\
+Randomized SVD & $O(NDd)$ & Random projection \\
+Laplacian Refinement & $O(Nkd)$ & Sparse $\mathbf{L} \times \mathbf{Z}$ \\
+Local Sparse Coding & $O(Nk^3)$ & ISTA per point \\
+\midrule
+\multicolumn{3}{l}{\textit{Phase 2: View Weighting (per view)}} \\
+$k$-NN Density & $O(Nk\log N)$ & Ball Tree \\
+Quality Metrics & $O(N)$ & Statistics \\
+\midrule
+\multicolumn{3}{l}{\textit{Phase 3: OT-Enhanced Clustering}} \\
+Sparse KNN Graph & $O(Nk\log N)$ & Ball Tree \\
+Landmark Selection & $O(NM)$ & $k$-means++ \\
+Cost Matrix & $O(NMd_{\text{concat}})$ & Distances \\
+Sinkhorn OT & $O(NMT)$ & $T$ iterations \\
+Graph Enhancement & $O(Nk)$ & Sparse edges \\
+Sparse Eigensolver & $O(NkK)$ & ARPACK \\
+K-Means & $O(NKI)$ & $I$ iterations \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-\textbf{Phase 2: Graph Alignment.} Standard KDE and OT require $O(N^2)$ operations. By utilizing Random Fourier Features with dimension $D_{RFF}$, we reduce the density estimation cost to $O(N D_{RFF})$. Similarly, the RFF-based Sinkhorn algorithm reduces the cost of computing transport plans from $O(N^2)$ to $O(T_2 N D_{RFF})$, where $T_2$ is the number of Sinkhorn iterations.
+\textbf{Total Complexity.} Summing all components:
+\[
+\mathcal{O}\left(V \cdot N \cdot (D \cdot d + k \cdot \log N + k^3) + N \cdot (M \cdot T + k \cdot K)\right)
+\]
 
-\textbf{Phase 3: Final Clustering.} Standard spectral clustering requires $O(N^3)$ for eigendecomposition. The Nyström approximation with $M$ landmarks ($M \ll N$) reduces the cost of constructing the low-rank matrix and performing SVD to $O(N M^2)$. The final K-Means step takes $O(T_3 N K M)$ where $K$ is the number of clusters.
+With typical parameters ($k \ll N$, $M \ll N$, $d \ll D$), this simplifies to:
+\[
+\mathcal{O}\left(V \cdot N \cdot \bar{D} \cdot d + V \cdot N \cdot k \cdot \log N\right) \approx \mathcal{O}(N \log N)
+\]
+where $\bar{D} = \frac{1}{V}\sum_v D^{(v)}$ is the average feature dimension.
 
-\textbf{Overall Complexity.} Summing these components, the overall time complexity of SPOCK is $O(N (D^2 + D_{RFF} + M^2))$, which is linear with respect to the number of samples $N$. This stands in sharp contrast to the $O(N^2)$ or $O(N^3)$ complexity of traditional multi-view clustering methods.
+\textbf{Space Complexity.} The sparse graph uses $O(Nk)$ storage. The OT transport plan requires $O(NM)$, and spectral embedding uses $O(NK)$. Total: $O(N(k + M + K))$, which is linear in $N$.
+
+\textbf{Comparison.} Traditional methods have:
+\begin{itemize}
+    \item Standard spectral clustering: $O(N^3)$ eigendecomposition
+    \item Full KDE: $O(N^2)$ pairwise distances
+    \item Full Sinkhorn OT: $O(N^2 T)$ per iteration
+\end{itemize}
+SPOCK achieves a speedup factor of $O(N / (k \log N + M))$ for large datasets.
 
 \bibliography{ref}
 \bibliographystyle{icml2026}
