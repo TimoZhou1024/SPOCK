@@ -329,10 +329,11 @@ W_{ij} = \exp\left(-\frac{\|\mathbf{x}_i - \mathbf{x}_j\|^2}{2\sigma_{ij}^2}\rig
 where $\sigma_i$ is the distance to the $k$-th nearest neighbor of point $i$. The graph is stored in sparse format with $O(Nk)$ edges.
 
 \textbf{Step 2: Landmark-based Sinkhorn OT.}
-To avoid $O(N^2)$ pairwise OT computation, we introduce $M \ll N$ landmark points selected via density-weighted $k$-means++ initialization (preferring high-density cluster cores). The landmark selection uses:
+To avoid $O(N^2)$ pairwise OT computation, we introduce $M \ll N$ landmark points selected via density-weighted $k$-means++ initialization. The selection prefers high-density cluster cores while maintaining spatial coverage:
 \[
-P(\text{select } \mathbf{x}_i) \propto \hat{p}(\mathbf{x}_i)^2 \cdot \min_{l \in \mathcal{L}} \|\mathbf{x}_i - \mathbf{x}_l\|^2
+P(\text{select } \mathbf{x}_i \mid \mathcal{L}) \propto \hat{p}(\mathbf{x}_i)^2 \cdot \min_{l \in \mathcal{L}} \|\mathbf{x}_i - \mathbf{x}_l\|^2
 \]
+The density-squared weighting $\hat{p}^2$ provides a smooth preference for cluster cores: it amplifies the distinction between high and low-density regions (since squaring increases the ratio between large and small values), while the distance term ensures landmarks are spatially distributed. This combination yields landmarks that are both representative (in dense regions) and diverse (well-separated).
 
 We then solve the entropy-regularized OT problem from all $N$ points to $M$ landmarks:
 \[
@@ -443,10 +444,11 @@ The view weights are computed analytically without iterative optimization:
 \textbf{Phase 3 Optimization: Sinkhorn Iterations + Sparse Eigensolver.}
 
 \textit{Step 3a: Landmark Selection.}
-We select $M$ landmarks using density-weighted $k$-means++ to prefer high-density cluster cores:
+We select $M$ landmarks using density-weighted $k$-means++ to balance cluster core representation and spatial coverage:
 \[
 P(\text{select } \mathbf{x}_i \mid \mathcal{L}) \propto \hat{p}(\mathbf{x}_i)^2 \cdot \min_{\ell \in \mathcal{L}} \|\mathbf{x}_i - \mathbf{x}_\ell\|^2
 \]
+The squared density term $\hat{p}^2$ acts as a soft selector: if point $i$ has twice the density of point $j$, it receives four times the selection weight, strongly favoring dense cluster cores without completely ignoring moderate-density regions.
 
 \textit{Step 3b: Sinkhorn-Knopp Algorithm.}
 The entropy-regularized OT is solved via alternating Bregman projections:
