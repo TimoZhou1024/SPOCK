@@ -131,7 +131,7 @@
 
 \begin{abstract}
 
-We propose \textbf{SPOCK} (Scalable and Structure-Preserving Optimal Transport based Clustering with Kernel-density-estimation), a robust framework for clustering large-scale, incomplete, and unaligned multi-view data. Existing methods often suffer from quadratic or cubic computational complexity or rely on rigid assumptions about data quality. SPOCK addresses these challenges through a unified design philosophy: preserving and enhancing the intrinsic geometric structure of data while maintaining end-to-end near-linear complexity. The framework operates in three phases: 1) Structure-Preserving Sparse Feature Selection, which leverages Randomized SVD with sparse Laplacian regularization to efficiently learn a denoised, informative feature subspace in $O(NDd)$ complexity; 2) Density-Aware View Weighting, which employs scalable $k$-NN based Kernel Density Estimation to compute adaptive view quality weights in $O(Nk\log N)$ time; and 3) OT-Enhanced Spectral Clustering, which utilizes a novel landmark-based Sinkhorn algorithm with $M \ll N$ landmarks to refine graph structure while maintaining $O(NMT)$ complexity. Experiments demonstrate SPOCK achieves high clustering accuracy while maintaining near-linear scalability, 
+We propose \textbf{SPOCK} (Scalable and Structure-Preserving Optimal Transport based Clustering with Kernel-density-estimation), a robust framework for clustering large-scale multi-view data with heterogeneous feature spaces and varying view quality. Existing methods often suffer from quadratic or cubic computational complexity or rely on rigid assumptions about view consistency. SPOCK addresses these challenges through a unified design philosophy: preserving and enhancing the intrinsic geometric structure of data while maintaining end-to-end near-linear complexity. The framework operates in three phases: 1) Structure-Preserving Sparse Feature Selection, which leverages Randomized SVD with sparse Laplacian regularization to efficiently learn a denoised, informative feature subspace in $O(NDd)$ complexity; 2) Density-Aware View Weighting, which employs scalable $k$-NN based Kernel Density Estimation to adaptively weight views according to their quality in $O(Nk\log N)$ time; and 3) OT-Enhanced Spectral Clustering, which utilizes a novel landmark-based Sinkhorn algorithm with $M \ll N$ landmarks to refine graph structure while maintaining $O(NMT)$ complexity. Experiments demonstrate SPOCK achieves high clustering accuracy while maintaining near-linear scalability, 
 % outperforming state-of-the-art methods particularly in settings with missing or misaligned views.
 
 \end{abstract}
@@ -141,11 +141,11 @@ We propose \textbf{SPOCK} (Scalable and Structure-Preserving Optimal Transport b
 Multi-view learning has emerged as a powerful paradigm for analyzing
 complex data from multiple sources or modalities. However, real-world
 applications often present challenges such as high-dimensional feature
-spaces, unaligned views, and incomplete data, which hinder the
+spaces, heterogeneous view dimensions, and varying view quality, which hinder the
 effectiveness of traditional methods. While existing approaches like
 co-training, multiple kernel learning, and subspace learning have shown
 promise, they frequently suffer from scalability issues when dealing
-with sparse or misaligned views \cite{XuTaoXu2013}.
+with high-dimensional or noisy views \cite{XuTaoXu2013}.
 
 Kernel density estimation (KDE) is a widely used non-parametric
 technique for estimating probability distributions, but its
@@ -155,8 +155,8 @@ prohibitively large. Compressive sensing offers a potential solution by
 exploiting sparsity to approximate signals with fewer measurements
 \cite{Baraniuk2007}. Recent work has explored its application in
 multi-view learning, yet few methods explicitly address the dual
-challenges of scalability and adaptability in the presence of incomplete
-or unaligned views.
+challenges of scalability and adaptability in the presence of
+heterogeneous feature spaces and varying view quality.
 
 To settle this problem, we propose a novel approach that integrates sparse feature selection
 with compressive KDE to overcome these limitations. Unlike existing
@@ -167,8 +167,7 @@ identifying and retaining only the most informative features, we reduce
 the number of kernels required for KDE while preserving discriminative
 power. The sparse feature representations are then fused using a
 novel graph enhancement strategy guided by scalable density estimation and landmark-based optimal transport. This not only mitigates
-the curse of dimensionality but also enhances robustness to missing or
-misaligned data.
+the curse of dimensionality but also enhances robustness to views of varying quality through adaptive weighting.
 
 The main contributions of our work are as follows. First, we introduce a
 sparse compressive KDE framework that significantly reduces
@@ -201,7 +200,7 @@ concludes the paper.
 
 \section{Related Work}\label{related-work}
 
-Multi-view learning has evolved through several paradigms. Early approaches focused on co-training and co-regularization \cite{Sun2013}. While effective for aligned views, these methods struggle with high-dimensional or incomplete data.
+Multi-view learning has evolved through several paradigms. Early approaches focused on co-training and co-regularization \cite{Sun2013}. While effective for consistent views, these methods struggle with high-dimensional or heterogeneous data.
 
 \subsection{Scalable Feature Selection}
 Traditional feature selection often relies on variance maximization (e.g., PCA) or pseudo-labels. However, full SVD incurs $O(\min(N, D) \cdot N \cdot D)$ complexity, which is prohibitive for high-dimensional data. Randomized SVD \cite{halko2011finding} provides a near-optimal low-rank approximation in $O(NDd)$ time by leveraging random projections. Recent works like TGL \cite{11205298} have explored local structure preservation, but often incur $O(N^2)$ costs for dense Laplacian construction. Our approach integrates randomized SVD with \textbf{sparse} Laplacian regularization, reducing complexity to $O(NDd + Nkd)$.
@@ -241,7 +240,7 @@ where $\mathbf{C} \in \mathbb{R}^{N \times M}$ is the cost matrix and the Sinkho
 
 \section{SPOCK: Scalable and Structure-Preserving Optimal Transport based Clustering with Kernel-density-estimation for Imperfect Multi-View Data}\label{spock-methodology}
 
-The SPOCK framework addresses the computational challenges of high-dimensional multi-view learning through a three-phase pipeline: (1) Structure-Preserving Sparse Feature Selection via Randomized SVD, (2) Density-Aware View Weighting via $k$-NN KDE, and (3) OT-Enhanced Spectral Clustering via Landmark Sinkhorn.
+The SPOCK framework addresses the computational and quality challenges of high-dimensional multi-view learning through a three-phase pipeline: (1) Structure-Preserving Sparse Feature Selection via Randomized SVD to handle heterogeneous high-dimensional views, (2) Density-Aware View Weighting via $k$-NN KDE to adaptively handle varying view quality, and (3) OT-Enhanced Spectral Clustering via Landmark Sinkhorn to capture global geometric structure.
 
 \begin{figure}
 \centering
@@ -286,7 +285,7 @@ The final projected features are row-normalized: $\tilde{\mathbf{X}} = \text{nor
 
 \subsection{Phase 2: Density-Aware View Weighting}\label{phase-2}
 
-Building upon the structure-preserving features $\tilde{\mathbf{X}}^{(v)}$ obtained in Phase 1, the second phase computes adaptive quality weights for each view based on local density estimation. Unlike approaches that require expensive pairwise computations, we leverage $k$-NN based density estimation to achieve $O(Nk\log N)$ complexity per view.
+Building upon the structure-preserving features $\tilde{\mathbf{X}}^{(v)}$ obtained in Phase 1, the second phase computes adaptive quality weights for each view based on local density estimation. This allows SPOCK to automatically downweight noisy or low-quality views while emphasizing informative ones. Unlike approaches that require expensive pairwise computations, we leverage $k$-NN based density estimation to achieve $O(Nk\log N)$ complexity per view.
 
 For each view $v$, we first perform a $k$-NN search using Ball Tree, which provides $O(N\log N)$ query time. For each point $\mathbf{x}_i$, we estimate its local density using the average distance to its $k$ nearest neighbors:
 \[
@@ -320,7 +319,7 @@ The total complexity of Phase 2 is $O(V \cdot N \cdot k \cdot \log N)$, which is
 
 \subsection{Phase 3: OT-Enhanced Spectral Clustering}\label{phase-3}
 
-The final phase performs clustering on the weighted concatenated features from Phase 2. The key innovation is using \textbf{landmark-based Optimal Transport} to enhance the $k$-NN graph structure before spectral embedding. This allows OT to refine cluster boundaries while maintaining near-linear complexity.
+The final phase performs clustering on the weighted concatenated features from Phase 2, where each view contributes proportionally to its estimated quality. The key innovation is using \textbf{landmark-based Optimal Transport} to enhance the $k$-NN graph structure before spectral embedding. The transport plan provides a global view of sample relationships through landmark mediators, enabling the refinement of local $k$-NN connections based on geometric consistency across the entire dataset.
 
 \textbf{Step 1: Sparse KNN Graph Construction.}
 We first build a sparse $k$-NN graph on the concatenated features $\mathbf{X}_{\text{concat}}$ using Ball Tree ($O(Nk\log N)$). For each edge $(i, j)$, the weight is computed using an adaptive heat kernel:
