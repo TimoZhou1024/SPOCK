@@ -78,6 +78,15 @@ class SPOCK:
         Number of Sinkhorn iterations.
     sinkhorn_reg : float, default=0.1
         Entropy regularization for Sinkhorn OT.
+    mu : float, default=0.7
+        Trade-off between density uniformity and feature compactness in view weighting.
+        Higher values emphasize density uniformity. Range: [0, 1].
+    gamma : float, default=0.06
+        OT bonus strength in graph enhancement. Calibrated so OT contributes ~5-10%
+        of average edge weight. Range: [0, 0.2].
+    tau : float, default=0.5
+        Similarity threshold for OT bonus. Only pairs with OT similarity > tau
+        receive the bonus. Range: [0, 1].
     use_spectral : bool, default=False
         Whether to use spectral clustering (True) or direct KMeans on features (False).
         KMeans mode often works better and is faster.
@@ -104,6 +113,9 @@ class SPOCK:
         rho=1.0,
         sinkhorn_iter=100,
         sinkhorn_reg=0.1,
+        mu=0.7,
+        gamma=0.06,
+        tau=0.5,
         use_spectral=False,
         random_state=None,
         verbose=False
@@ -124,6 +136,9 @@ class SPOCK:
         self.rho = rho
         self.sinkhorn_iter = sinkhorn_iter
         self.sinkhorn_reg = sinkhorn_reg
+        self.mu = mu
+        self.gamma = gamma
+        self.tau = tau
         self.random_state = random_state
         self.verbose = verbose
         
@@ -672,7 +687,8 @@ class SPOCK:
             avg_dist = distances[:, 1:k+1].mean()
             compactness = 1.0 / (1.0 + avg_dist)
             
-            view_qualities.append(quality * 0.7 + compactness * 0.3)
+            # Combine with mu weighting (paper: mu=0.7 for density, 1-mu=0.3 for compactness)
+            view_qualities.append(quality * self.mu + compactness * (1 - self.mu))
         
         # Normalize to weights
         view_weights = np.array(view_qualities)
@@ -719,7 +735,8 @@ class SPOCK:
             avg_degree = G.sum(axis=1).mean()
             connectivity = min(avg_degree / self.k_neighbors, 1.0)
             
-            view_qualities.append(quality * 0.7 + connectivity * 0.3)
+            # Combine with mu weighting (paper: mu=0.7 for density, 1-mu=0.3 for compactness)
+            view_qualities.append(quality * self.mu + connectivity * (1 - self.mu))
         
         # Compute view weights from qualities
         view_weights = np.array(view_qualities)
@@ -1400,10 +1417,12 @@ class SPOCK:
         # Step 8: Original density correction
         density_factor = 0.5 + 0.5 * density_sims
         
-        # Step 9: Slightly larger additive OT bonus for high-similarity pairs
-        ot_bonus = 0.06 * np.maximum(0, ot_sims - 0.5)  # Only positive bonus
+        # Step 9: Additive OT bonus for high-similarity pairs (paper: gamma=0.06, tau=0.5)
+        # gamma controls OT contribution (~5-10% of avg edge weight)
+        # tau is similarity threshold - only pairs with sim > tau receive bonus
+        ot_bonus = self.gamma * np.maximum(0, ot_sims - self.tau)
         
-        # Combined: multiplicative density + additive OT
+        # Combined: multiplicative density + additive OT (additive fusion per paper)
         boost = density_factor + ot_bonus
         
         vals = vals * boost

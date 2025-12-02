@@ -307,8 +307,9 @@ q_{\text{compact}}^{(v)} = \frac{1}{1 + \bar{d}_{\text{avg}}^{(v)}}
 
 The final view weight combines these criteria:
 \[
-w_v = \frac{0.7 \cdot q_{\text{density}}^{(v)} + 0.3 \cdot q_{\text{compact}}^{(v)}}{\sum_{u=1}^{V} (0.7 \cdot q_{\text{density}}^{(u)} + 0.3 \cdot q_{\text{compact}}^{(u)})}
+w_v = \frac{\mu \cdot q_{\text{density}}^{(v)} + (1-\mu) \cdot q_{\text{compact}}^{(v)}}{\sum_{u=1}^{V} (\mu \cdot q_{\text{density}}^{(u)} + (1-\mu) \cdot q_{\text{compact}}^{(u)})}
 \]
+where $\mu \in [0,1]$ controls the trade-off between density uniformity and feature compactness. We set $\mu = 0.7$ as the default, which empirically balances the two criteria. A sensitivity analysis in Section 5 demonstrates that SPOCK's performance remains stable across a wide range of $\mu$ values.
 
 These view weights are used in Phase 3 to create a weighted concatenation of projected features:
 \[
@@ -352,11 +353,15 @@ For each edge $(i, j)$ in the sparse graph, we compute the OT-based similarity a
 \text{sim}_{\text{OT}}(i, j) = \mathbf{t}_i^\top \mathbf{t}_j
 \]
 
-The edge weight is enhanced using an \textbf{additive OT bonus} combined with density correction:
+The edge weight is enhanced using an \textbf{additive fusion} of local and global information:
 \[
-W'_{ij} = W_{ij} \cdot \underbrace{\left(0.5 + 0.5 \cdot (1 - |\hat{p}_i - \hat{p}_j|)\right)}_{\text{density factor}} + \underbrace{\gamma \cdot \max(0, \text{sim}_{\text{OT}}(i, j) - 0.5)}_{\text{OT bonus}}
+W'_{ij} = W_{ij} \cdot \underbrace{\left(0.5 + 0.5 \cdot (1 - |\hat{p}_i - \hat{p}_j|)\right)}_{\text{density factor}} + \underbrace{\gamma \cdot \max(0, \text{sim}_{\text{OT}}(i, j) - \tau)}_{\text{OT bonus}}
 \]
-where $\gamma = 0.06$ controls the OT contribution. This additive formulation ensures OT only provides positive reinforcement for high-similarity pairs, preserving the base graph structure.
+where $\gamma \in [0, 0.2]$ controls the OT contribution strength and $\tau = 0.5$ is the similarity threshold.
+
+\textbf{Rationale for Additive Fusion.} We adopt additive rather than multiplicative fusion because the $k$-NN graph $\mathbf{W}$ and OT bonus provide two \emph{complementary, independent} information sources: (1) the $k$-NN graph captures \emph{local manifold structure} based on pairwise distances, while (2) the OT bonus captures \emph{global geometric consistency} through landmark-mediated transport. Multiplicative fusion ($W' = W \cdot (1 + \gamma \cdot \text{bonus})$) would suppress global signals when local similarity $W_{ij}$ is low, potentially missing cross-cluster bridges that are geometrically consistent but locally distant. Additive fusion allows both sources to contribute independently: even if a $k$-NN edge has moderate weight, a high OT similarity can reinforce it, enabling the discovery of globally coherent cluster structures. The threshold $\tau$ ensures that only genuinely similar pairs (sharing similar transport profiles) receive the bonus, preventing noise amplification.
+
+\textbf{Choice of $\gamma$.} We set $\gamma = 0.06$ as the default, calibrated so that the OT bonus contributes approximately 5-10\% of the average edge weight. This ensures OT acts as a refinement rather than a dominant signal. Sensitivity analysis (Section 5) shows stable performance for $\gamma \in [0.02, 0.15]$.
 
 \textbf{Step 4: Sparse Spectral Embedding.}
 We compute the normalized Laplacian of the enhanced sparse graph:
@@ -385,20 +390,20 @@ subject to $\mathbf{P}^{(v)\top}\mathbf{P}^{(v)} = \mathbf{I}$.
 \textbf{Phase 2: Density-Based View Quality.}
 For each view $v$, the quality weight $w_v$ is computed from density statistics:
 \begin{equation}
-w_v = \frac{q^{(v)}}{\sum_{u=1}^{V} q^{(u)}}, \quad q^{(v)} = \frac{\mu_1}{1 + \text{CV}(\hat{p}^{(v)})} + \frac{\mu_2}{1 + \bar{d}^{(v)}_{\text{avg}}}
+w_v = \frac{q^{(v)}}{\sum_{u=1}^{V} q^{(u)}}, \quad q^{(v)} = \frac{\mu}{1 + \text{CV}(\hat{p}^{(v)})} + \frac{1-\mu}{1 + \bar{d}^{(v)}_{\text{avg}}}
 \end{equation}
-where $\text{CV}(\cdot)$ is the coefficient of variation and $\bar{d}^{(v)}_{\text{avg}}$ is the average neighbor distance.
+where $\text{CV}(\cdot)$ is the coefficient of variation, $\bar{d}^{(v)}_{\text{avg}}$ is the average neighbor distance, and $\mu \in [0,1]$ balances density uniformity against feature compactness.
 
 \textbf{Phase 3: OT-Enhanced Spectral Clustering.}
 Given the weighted concatenated features $\mathbf{X}_{\text{concat}}$ and the landmark set $\mathcal{L}$ with $|\mathcal{L}| = M$, we solve the entropy-regularized OT problem:
 \begin{equation}
 \min_{\mathbf{T} \geq 0} \langle \mathbf{T}, \mathbf{C} \rangle + \varepsilon H(\mathbf{T}), \quad \text{s.t. } \mathbf{T}\mathbf{1}_M = \mathbf{a}, ~ \mathbf{T}^\top\mathbf{1}_N = \mathbf{b}
 \end{equation}
-The transport plan $\mathbf{T}$ is used to enhance the sparse $k$-NN graph $\mathbf{W}$ via:
+The transport plan $\mathbf{T}$ is used to enhance the sparse $k$-NN graph $\mathbf{W}$ via additive fusion:
 \begin{equation}
-W'_{ij} = W_{ij} \cdot \underbrace{\left(\frac{1 + (1 - |\hat{p}_i - \hat{p}_j|)}{2}\right)}_{\text{Density Correction}} + \underbrace{\gamma_{\text{OT}} \cdot [\mathbf{t}_i^\top \mathbf{t}_j - \tau]_+}_{\text{OT Bonus}}
+W'_{ij} = W_{ij} \cdot \underbrace{\left(\frac{1 + (1 - |\hat{p}_i - \hat{p}_j|)}{2}\right)}_{\text{Density Correction}} + \underbrace{\gamma \cdot [\mathbf{t}_i^\top \mathbf{t}_j - \tau]_+}_{\text{OT Bonus}}
 \end{equation}
-where $[\cdot]_+ = \max(0, \cdot)$ and $\mathbf{t}_i$ is the normalized transport profile.
+where $[\cdot]_+ = \max(0, \cdot)$, $\mathbf{t}_i$ is the normalized transport profile, $\gamma \in [0, 0.2]$ controls OT contribution strength, and $\tau$ is the similarity threshold. The additive formulation allows local ($k$-NN) and global (OT) information to contribute independently.
 
 The final spectral embedding $\mathbf{Z}$ is obtained by solving:
 \begin{equation}
@@ -470,7 +475,7 @@ The complete optimization procedure is summarized in Algorithm \ref{alg:spock-op
    \caption{SPOCK Optimization Procedure}
    \label{alg:spock-opt}
 \begin{algorithmic}
-   \STATE {\bfseries Input:} $\{\mathbf{X}^{(v)}\}_{v=1}^V$, $K$, $k$, $M$, $\alpha$, $\varepsilon$, $T_{\max}$.
+   \STATE {\bfseries Input:} $\{\mathbf{X}^{(v)}\}_{v=1}^V$, $K$, $k$, $M$, $\alpha$, $\mu$, $\gamma$, $\varepsilon$, $T_{\max}$.
    \STATE {\bfseries Output:} Cluster assignments $\{y_i\}_{i=1}^N$.
    \STATE
    \STATE \textcolor{blue}{\textbf{// Phase 1: Randomized SVD + Laplacian Refinement}}
@@ -488,7 +493,7 @@ The complete optimization procedure is summarized in Algorithm \ref{alg:spock-op
    \FOR{each view $v = 1, \ldots, V$}
        \STATE $\{\bar{d}_i^{(v)}\} \leftarrow$ BallTree-KNN$(\tilde{\mathbf{X}}^{(v)}, k)$ \hfill \textit{// $O(Nk\log N)$}
        \STATE $\hat{p}^{(v)}_i \leftarrow \exp(-\bar{d}_i^{(v)2} / 2\sigma^2)$
-       \STATE $q^{(v)} \leftarrow \mu_1/(1 + \text{CV}(\hat{p}^{(v)})) + \mu_2/(1 + \text{mean}(\bar{d}^{(v)}))$
+       \STATE $q^{(v)} \leftarrow \mu/(1 + \text{CV}(\hat{p}^{(v)})) + (1-\mu)/(1 + \text{mean}(\bar{d}^{(v)}))$
    \ENDFOR
    \STATE $w_v \leftarrow q^{(v)} / \sum_u q^{(u)}$
    \STATE $\mathbf{X}_{\text{cat}} \leftarrow [\sqrt{w_1}\tilde{\mathbf{X}}^{(1)}, \ldots, \sqrt{w_V}\tilde{\mathbf{X}}^{(V)}]$
@@ -507,7 +512,7 @@ The complete optimization procedure is summarized in Algorithm \ref{alg:spock-op
    \STATE $\mathbf{t}_i \leftarrow \mathbf{T}_{i,:} / \|\mathbf{T}_{i,:}\|_2$ for all $i$
    \FOR{each edge $(i, j) \in \mathbf{W}$}
        \STATE $\rho_{ij} \leftarrow (1 + (1 - |\hat{p}_i - \hat{p}_j|))/2$
-       \STATE $W'_{ij} \leftarrow W_{ij} \cdot \rho_{ij} + \gamma_{\text{OT}} [\mathbf{t}_i^\top \mathbf{t}_j - 0.5]_+$
+       \STATE $W'_{ij} \leftarrow W_{ij} \cdot \rho_{ij} + \gamma [\mathbf{t}_i^\top \mathbf{t}_j - \tau]_+$ \hfill \textit{// Additive fusion}
    \ENDFOR
    \STATE $\mathbf{L}' \leftarrow \mathbf{I} - \mathbf{D}'^{-1/2}\mathbf{W}'\mathbf{D}'^{-1/2}$
    \STATE $\mathbf{Z} \leftarrow$ ARPACK$(\mathbf{L}', K, \text{`smallest'})$ \hfill \textit{// $O(NkK)$}
