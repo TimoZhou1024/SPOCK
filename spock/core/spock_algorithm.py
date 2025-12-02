@@ -168,10 +168,11 @@ class SPOCK:
         self.projected_views_ = projected_views
         
         if self.use_spectral:
-            # Phase 2: Graph construction and fusion
+            # Phase 2: Compute view weights only (skip expensive graph fusion)
             if self.verbose:
-                print("Phase 2: Multi-view Graph Fusion...")
-            self.consensus_graph_, self.view_weights_ = self._phase2_graph_alignment(projected_views)
+                print("Phase 2: Computing View Weights...")
+            self.view_weights_ = self._phase2_compute_view_weights(projected_views)
+            self.consensus_graph_ = None  # Not needed for hybrid clustering
             
             # Phase 3: Final Clustering via Hybrid Spectral + Features
             if self.verbose:
@@ -258,27 +259,55 @@ class SPOCK:
         return projected_views, projection_matrices, self_expression_matrices
     
     def _construct_laplacian(self, X):
-        """Construct graph Laplacian from KNN graph using ANN."""
+        """
+        Construct SPARSE graph Laplacian from KNN graph.
+        
+        Complexity: O(N·k·log(N)) for KNN + O(N·k) for graph construction
+        Space: O(N·k) sparse matrix
+        """
         N = X.shape[0]
         k = min(self.k_neighbors, N - 1)
         
-        # Use FAISS for fast ANN if available
-        if HAS_FAISS and N > 1000:
-            A = self._faiss_knn(X, k)
-        else:
-            A = self._sklearn_knn(X, k)
+        # Fast KNN search: O(N·log(N)·D) with ball tree
+        nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='ball_tree').fit(X)
+        distances, indices = nbrs.kneighbors(X)
         
-        # Make symmetric
-        A = (A + A.T) / 2
-        A = np.minimum(A, 1)  # Cap at 1
+        # Adaptive bandwidth
+        sigma = np.median(distances[:, 1:]) + 1e-10
         
-        # Compute normalized Laplacian: L = I - D^{-1/2} A D^{-1/2}
-        d = A.sum(axis=1)
+        # Build SPARSE adjacency matrix: O(N·k)
+        row_idx = []
+        col_idx = []
+        data = []
+        
+        for i in range(N):
+            for j_idx in range(1, k + 1):
+                j = indices[i, j_idx]
+                dist = distances[i, j_idx]
+                weight = np.exp(-dist**2 / (2 * sigma**2))
+                
+                row_idx.append(i)
+                col_idx.append(j)
+                data.append(weight)
+        
+        # Sparse adjacency
+        A_sparse = sparse.csr_matrix(
+            (data, (row_idx, col_idx)), shape=(N, N)
+        )
+        
+        # Symmetrize
+        A_sparse = (A_sparse + A_sparse.T) / 2
+        
+        # Sparse normalized Laplacian: L = I - D^{-1/2} A D^{-1/2}
+        d = np.array(A_sparse.sum(axis=1)).flatten()
         d = np.maximum(d, 1e-10)
-        D_inv_sqrt = np.diag(1.0 / np.sqrt(d))
-        L = np.eye(N) - D_inv_sqrt @ A @ D_inv_sqrt
+        d_inv_sqrt = 1.0 / np.sqrt(d)
         
-        return L
+        # D^{-1/2} A D^{-1/2} as sparse
+        D_inv_sqrt = sparse.diags(d_inv_sqrt)
+        L_sparse = sparse.eye(N) - D_inv_sqrt @ A_sparse @ D_inv_sqrt
+        
+        return L_sparse
     
     def _faiss_knn(self, X, k):
         """Fast KNN using FAISS."""
@@ -317,47 +346,63 @@ class SPOCK:
     
     def _admm_optimization(self, X, L, d):
         """
-        Optimized feature projection for structure preservation.
+        Near-linear feature projection using randomized SVD.
         
-        Uses a hybrid approach:
-        1. PCA for variance preservation (global structure)
-        2. Laplacian regularization for local structure
+        Complexity: O(N·D·d) instead of O(D³)
         
-        This balances between preserving global discriminability 
-        and local neighborhood structure.
+        Uses:
+        1. Randomized SVD for fast PCA: O(N·D·d)
+        2. Sparse Laplacian regularization: O(N·k·d)
         """
         N, D = X.shape
         
-        # Compute covariance matrix
-        XtX = X.T @ X
-        XtLX = X.T @ L @ X
-        
-        # Regularization for numerical stability
-        reg = 1e-6 * np.trace(XtX) / D
-        
-        # Hybrid objective: maximize variance while minimizing Laplacian energy
-        # Solve: max P' X'X P - alpha * P' X'LX P
-        # Equivalent to: max P' (X'X - alpha * X'LX) P
-        
-        # Blend ratio: higher alpha means more local structure preservation
-        alpha_blend = min(self.alpha * 0.1, 0.5)  # Keep alpha influence modest
-        
-        M = XtX - alpha_blend * XtLX
-        M = (M + M.T) / 2  # Ensure symmetry
-        M += reg * np.eye(D)  # Regularize
-        
-        # Solve eigenvalue problem
-        try:
-            eigenvalues, eigenvectors = np.linalg.eigh(M)
+        # Randomized PCA for large D: O(N·D·d)
+        if D > 500:
+            # Use randomized projection
+            n_oversamples = min(10, D - d)
+            n_components = d + n_oversamples
             
-            # Take d eigenvectors corresponding to largest eigenvalues
+            # Random projection matrix
+            Omega = np.random.randn(D, n_components)
+            Y = X @ Omega  # N x n_components
+            
+            # QR decomposition
+            Q, _ = np.linalg.qr(Y)
+            
+            # Project X onto Q
+            B = Q.T @ X  # n_components x D
+            
+            # SVD of small matrix
+            _, S, Vt = np.linalg.svd(B, full_matrices=False)
+            
+            # Take top d right singular vectors
+            P = Vt[:d].T  # D x d
+        else:
+            # Standard approach for small D
+            XtX = X.T @ X
+            reg = 1e-6 * np.trace(XtX) / D
+            XtX += reg * np.eye(D)
+            
+            eigenvalues, eigenvectors = np.linalg.eigh(XtX)
             idx = np.argsort(eigenvalues)[::-1][:d]
             P = eigenvectors[:, idx]
-        except Exception:
-            # Fallback to standard PCA
-            eigenvalues, eigenvectors = np.linalg.eigh(XtX + reg * np.eye(D))
-            idx = np.argsort(eigenvalues)[::-1][:d]
-            P = eigenvectors[:, idx]
+        
+        # Light Laplacian regularization using sparse L: O(N·k·d)
+        Z = X @ P
+        alpha_blend = min(self.alpha * 0.1, 0.5)
+        
+        if alpha_blend > 0 and sparse.issparse(L):
+            # Compute LZ efficiently for sparse L: O(N·k·d)
+            LZ = L @ Z
+            
+            # Gradient step to reduce Laplacian energy
+            # P_new = P - α * X'LZ / N
+            grad = X.T @ LZ / N
+            P = P - alpha_blend * 0.1 * grad
+            
+            # Re-orthogonalize
+            P, _ = np.linalg.qr(P)
+            P = P[:, :d]
         
         # Orthonormalize P
         P, _ = np.linalg.qr(P)
@@ -370,15 +415,20 @@ class SPOCK:
         S = self._compute_sparse_S(Z)
         
         if self.verbose:
-            # Compute objective for reporting
+            # Compute objective for reporting (simplified for sparse L)
             I_minus_S = np.eye(N) - S
             recon_term = I_minus_S @ Z
             recon_loss = np.linalg.norm(recon_term, 'fro') ** 2
-            lap_loss = self.alpha * np.trace(P.T @ XtLX @ P)
+            
+            # Laplacian term with sparse L
+            if sparse.issparse(L):
+                LZ = L @ Z
+                lap_loss = self.alpha * np.trace(Z.T @ LZ)
+            else:
+                lap_loss = 0.0
+            
             obj = recon_loss + lap_loss
             print(f"    Optimization complete, obj={obj:.4f}")
-        
-        return P, S
         
         return P, S
     
@@ -587,6 +637,51 @@ class SPOCK:
         return X * scale
     
     # ==================== Phase 2: RFF-based Graph Alignment ====================
+    
+    def _phase2_compute_view_weights(self, projected_views):
+        """
+        Phase 2 (Near-Linear): Compute view quality weights using KDE.
+        
+        Complexity: O(V · N · k · log(N)) for KNN
+                   O(V · N · k) for density estimation
+        Total: O(V · N · k · log(N))
+        """
+        n_views = len(projected_views)
+        view_qualities = []
+        
+        for v, X in enumerate(projected_views):
+            if self.verbose:
+                print(f"  Processing view {v+1}/{n_views}...")
+            
+            # Fast KNN-based quality estimation: O(N · k · log(N))
+            N = X.shape[0]
+            k = min(self.k_neighbors, N - 1)
+            
+            nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='ball_tree').fit(X)
+            distances, _ = nbrs.kneighbors(X)
+            
+            # Density from k-NN distances
+            sigma = np.median(distances[:, 1:]) + 1e-10
+            densities = np.exp(-distances[:, 1:].mean(axis=1)**2 / (2 * sigma**2))
+            
+            # View quality: uniform density = high quality
+            cv = np.std(densities) / (np.mean(densities) + 1e-10)
+            quality = 1.0 / (1.0 + cv)
+            
+            # Also consider compactness (average neighbor distance)
+            avg_dist = distances[:, 1:k+1].mean()
+            compactness = 1.0 / (1.0 + avg_dist)
+            
+            view_qualities.append(quality * 0.7 + compactness * 0.3)
+        
+        # Normalize to weights
+        view_weights = np.array(view_qualities)
+        view_weights = view_weights / (view_weights.sum() + 1e-10)
+        
+        if self.verbose:
+            print(f"  View weights: {view_weights}")
+        
+        return view_weights
     
     def _phase2_graph_alignment(self, projected_views):
         """
@@ -1203,30 +1298,31 @@ class SPOCK:
     
     def _build_ot_regularized_graph(self, X):
         """
-        Build a high-quality similarity graph using OT-regularized KNN.
+        Build SPARSE similarity graph using density-regularized KNN.
         
-        Key ideas:
-        1. Use adaptive bandwidth for heat kernel
-        2. Regularize edge weights using local density
-        3. Apply entropic OT for edge reweighting
+        Complexity: O(N·k·log(N)) for KNN + O(N·k) for graph
+        Space: O(N·k) sparse matrix
         """
         N = X.shape[0]
         k = min(self.k_neighbors * 2, N - 1)
         
-        # Find KNN
-        nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='auto').fit(X)
+        # Fast KNN: O(N·log(N)·D)
+        nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='ball_tree').fit(X)
         distances, indices = nbrs.kneighbors(X)
         
-        # Adaptive sigma (per-point bandwidth)
-        sigma_i = distances[:, self.k_neighbors]  # Distance to k-th neighbor
+        # Adaptive sigma per point
+        sigma_i = distances[:, self.k_neighbors]
         sigma_i = np.maximum(sigma_i, 1e-10)
         
-        # Compute local density estimate
+        # Local density: O(N·k)
         density = 1.0 / (np.mean(distances[:, 1:self.k_neighbors+1], axis=1) + 1e-10)
         density = (density - density.min()) / (density.max() - density.min() + 1e-10)
         
-        # Build graph with heat kernel and density correction
-        W = np.zeros((N, N))
+        # Build SPARSE graph: O(N·k)
+        row_idx = []
+        col_idx = []
+        data = []
+        
         for i in range(N):
             for j_idx in range(1, k + 1):
                 j = indices[i, j_idx]
@@ -1236,20 +1332,24 @@ class SPOCK:
                 sigma_ij = (sigma_i[i] + sigma_i[j]) / 2
                 w_heat = np.exp(-dist**2 / (2 * sigma_ij**2))
                 
-                # Density-aware correction: boost edges between similar-density points
+                # Density-aware correction
                 density_sim = 1.0 - np.abs(density[i] - density[j])
-                w_density = 0.5 + 0.5 * density_sim  # Range [0.5, 1.0]
+                w_density = 0.5 + 0.5 * density_sim
                 
-                W[i, j] = w_heat * w_density
+                weight = w_heat * w_density
+                row_idx.append(i)
+                col_idx.append(j)
+                data.append(weight)
+        
+        # Sparse matrix
+        W_sparse = sparse.csr_matrix(
+            (data, (row_idx, col_idx)), shape=(N, N)
+        )
         
         # Symmetrize
-        W = (W + W.T) / 2
+        W_sparse = (W_sparse + W_sparse.T) / 2
         
-        # Apply local scaling for better cluster separation
-        # D = np.sqrt(np.outer(W.sum(axis=1), W.sum(axis=1))) + 1e-10
-        # W = W / D
-        
-        return W
+        return W_sparse
     
     def _phase3_clustering(self, consensus_graph, n_samples):
         """
@@ -1377,27 +1477,54 @@ class SPOCK:
         return np.array(landmarks)
     
     def _standard_spectral_embedding(self, W):
-        """Standard spectral embedding for smaller datasets."""
-        N = W.shape[0]
+        """
+        Spectral embedding supporting both dense and sparse matrices.
         
-        # Degree matrix
-        d = W.sum(axis=1)
-        d = np.maximum(d, 1e-10)
-        D_inv_sqrt = np.diag(1.0 / np.sqrt(d))
+        For sparse: O(N·k·K) using sparse eigensolver
+        For dense: O(N³) fallback
+        """
+        N = W.shape[0] if not sparse.issparse(W) else W.shape[0]
         
-        # Normalized adjacency
-        W_norm = D_inv_sqrt @ W @ D_inv_sqrt
-        W_norm = (W_norm + W_norm.T) / 2
-        
-        K = self.n_clusters
-        try:
-            eigenvalues, eigenvectors = eigsh(W_norm, k=K, which='LM')
-            idx = np.argsort(eigenvalues)[::-1]
-            eigenvectors = eigenvectors[:, idx]
-        except:
-            eigenvalues, eigenvectors = np.linalg.eigh(W_norm)
-            idx = np.argsort(eigenvalues)[::-1][:K]
-            eigenvectors = eigenvectors[:, idx]
+        if sparse.issparse(W):
+            # Sparse path: O(N·k·K)
+            d = np.array(W.sum(axis=1)).flatten()
+            d = np.maximum(d, 1e-10)
+            D_inv_sqrt = sparse.diags(1.0 / np.sqrt(d))
+            
+            # Normalized adjacency (sparse)
+            W_norm = D_inv_sqrt @ W @ D_inv_sqrt
+            W_norm = (W_norm + W_norm.T) / 2
+            
+            K = self.n_clusters
+            try:
+                # Sparse eigenvalue solver: O(N·nnz·K)
+                eigenvalues, eigenvectors = eigsh(W_norm, k=K, which='LM')
+                idx = np.argsort(eigenvalues)[::-1]
+                eigenvectors = eigenvectors[:, idx]
+            except Exception:
+                # Fallback to dense
+                W_dense = W_norm.toarray() if sparse.issparse(W_norm) else W_norm
+                eigenvalues, eigenvectors = np.linalg.eigh(W_dense)
+                idx = np.argsort(eigenvalues)[::-1][:K]
+                eigenvectors = eigenvectors[:, idx]
+        else:
+            # Dense path
+            d = W.sum(axis=1)
+            d = np.maximum(d, 1e-10)
+            D_inv_sqrt = np.diag(1.0 / np.sqrt(d))
+            
+            W_norm = D_inv_sqrt @ W @ D_inv_sqrt
+            W_norm = (W_norm + W_norm.T) / 2
+            
+            K = self.n_clusters
+            try:
+                eigenvalues, eigenvectors = eigsh(W_norm, k=K, which='LM')
+                idx = np.argsort(eigenvalues)[::-1]
+                eigenvectors = eigenvectors[:, idx]
+            except Exception:
+                eigenvalues, eigenvectors = np.linalg.eigh(W_norm)
+                idx = np.argsort(eigenvalues)[::-1][:K]
+                eigenvectors = eigenvectors[:, idx]
         
         Z = normalize(eigenvectors, norm='l2', axis=1)
         
