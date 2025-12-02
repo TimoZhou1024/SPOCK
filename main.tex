@@ -373,15 +373,14 @@ K-Means is applied to the row-normalized embedding $\mathbf{Z}$ with multiple re
 SPOCK integrates three phases into a coherent pipeline, each designed for near-linear scalability. We now formalize the overall optimization objective that unifies feature selection, view weighting, and graph-based clustering.
 
 \textbf{Phase 1: Structure-Preserving Feature Projection.}
-For each view $v$, we seek a projection matrix $\mathbf{P}^{(v)} \in \mathbb{R}^{D^{(v)} \times d}$ and a sparse self-expression matrix $\mathbf{S}^{(v)} \in \mathbb{R}^{N \times N}$ that jointly minimize reconstruction error while preserving local manifold structure. The objective is:
+For each view $v$, we seek a projection matrix $\mathbf{P}^{(v)} \in \mathbb{R}^{D^{(v)} \times d}$ that minimizes reconstruction error while preserving local manifold structure. The objective is:
 \begin{equation}
 \begin{aligned}
-\min_{\mathbf{P}^{(v)}, \mathbf{S}^{(v)}} \mathcal{J}_1^{(v)} = & ~ \underbrace{\|\mathbf{X}^{(v)} - \mathbf{X}^{(v)}\mathbf{P}^{(v)}\mathbf{P}^{(v)\top}\|_F^2}_{\text{Reconstruction}} \\
-& + \alpha \underbrace{\text{Tr}(\mathbf{P}^{(v)\top} \mathbf{X}^{(v)\top} \mathbf{L}^{(v)} \mathbf{X}^{(v)} \mathbf{P}^{(v)})}_{\text{Laplacian Smoothness}} \\
-& + \beta \underbrace{\|\tilde{\mathbf{X}}^{(v)} - \mathbf{S}^{(v)}\tilde{\mathbf{X}}^{(v)}\|_F^2 + \gamma \|\mathbf{S}^{(v)}\|_1}_{\text{Sparse Self-Expression}}
+\min_{\mathbf{P}^{(v)}} \mathcal{J}_1^{(v)} = & ~ \underbrace{\|\mathbf{X}^{(v)} - \mathbf{X}^{(v)}\mathbf{P}^{(v)}\mathbf{P}^{(v)\top}\|_F^2}_{\text{Reconstruction}} \\
+& + \alpha \underbrace{\text{Tr}(\mathbf{P}^{(v)\top} \mathbf{X}^{(v)\top} \mathbf{L}^{(v)} \mathbf{X}^{(v)} \mathbf{P}^{(v)})}_{\text{Laplacian Smoothness}}
 \end{aligned}
 \end{equation}
-subject to $\mathbf{P}^{(v)\top}\mathbf{P}^{(v)} = \mathbf{I}$, $\text{diag}(\mathbf{S}^{(v)}) = 0$, and $\mathbf{S}^{(v)}$ is $k$-sparse (non-zero only for $k$-NN).
+subject to $\mathbf{P}^{(v)\top}\mathbf{P}^{(v)} = \mathbf{I}$.
 
 \textbf{Phase 2: Density-Based View Quality.}
 For each view $v$, the quality weight $w_v$ is computed from density statistics:
@@ -411,12 +410,12 @@ where $\mathbf{L}'_{\text{norm}} = \mathbf{I} - \mathbf{D}'^{-1/2}\mathbf{W}'\ma
 
 We adopt an \textbf{alternating minimization scheme} to efficiently solve the multi-phase optimization problem. Each phase is solved using specialized algorithms tailored for near-linear complexity.
 
-\textbf{Phase 1 Optimization: Block Coordinate Descent with Randomized SVD.}
+\textbf{Phase 1 Optimization: Randomized SVD with Laplacian Refinement.}
 
-The joint optimization over $(\mathbf{P}^{(v)}, \mathbf{S}^{(v)})$ is non-convex. We employ block coordinate descent (BCD) with the following alternating updates:
+The optimization over $\mathbf{P}^{(v)}$ is solved efficiently using the following two-step procedure:
 
-\textit{Step 1a: Update $\mathbf{P}^{(v)}$ via Randomized SVD.}
-Fixing $\mathbf{S}^{(v)}$, the projection matrix is initialized by the top-$d$ right singular vectors of $\mathbf{X}^{(v)}$. For high-dimensional data ($D > 500$), we use randomized SVD:
+\textit{Step 1a: Initialize $\mathbf{P}^{(v)}$ via Randomized SVD.}
+The projection matrix is initialized by the top-$d$ right singular vectors of $\mathbf{X}^{(v)}$. For high-dimensional data ($D > 500$), we use randomized SVD:
 \begin{enumerate}
     \item Sample random matrix $\mathbf{\Omega} \in \mathbb{R}^{D \times (d+p)}$ with $p \approx 10$.
     \item Compute sketch $\mathbf{Y} = \mathbf{X}^{(v)}\mathbf{\Omega}$ and QR factorization $\mathbf{Y} = \mathbf{Q}\mathbf{R}$.
@@ -431,17 +430,6 @@ We refine $\mathbf{P}^{(v)}$ to incorporate local structure using sparse Laplaci
 \mathbf{P}^{(v)} \leftarrow \mathbf{P}^{(v)} - \eta \cdot \mathbf{X}^{(v)\top} \mathbf{L}^{(v)}_{\text{sparse}} (\mathbf{X}^{(v)}\mathbf{P}^{(v)})
 \]
 followed by QR re-orthogonalization. Since $\mathbf{L}^{(v)}_{\text{sparse}}$ has only $O(Nk)$ non-zeros, this costs $O(Nkd)$ per iteration.
-
-\textit{Step 1c: Update $\mathbf{S}^{(v)}$ via Localized ISTA.}
-Fixing $\mathbf{P}^{(v)}$, let $\tilde{\mathbf{X}}^{(v)} = \mathbf{X}^{(v)}\mathbf{P}^{(v)}$. For each point $i$, we solve:
-\[
-\min_{\mathbf{w}_i} \frac{1}{2}\|\tilde{\mathbf{x}}_i - \tilde{\mathbf{X}}^{(v)}_{\mathcal{N}_k(i)} \mathbf{w}_i\|_2^2 + \gamma \|\mathbf{w}_i\|_1
-\]
-using the Iterative Soft Thresholding Algorithm (ISTA):
-\[
-\mathbf{w}_i^{(t+1)} = \mathcal{S}_{\gamma/L}\left(\mathbf{w}_i^{(t)} - \frac{1}{L}\tilde{\mathbf{X}}^{(v)\top}_{\mathcal{N}_k(i)}(\tilde{\mathbf{X}}^{(v)}_{\mathcal{N}_k(i)}\mathbf{w}_i^{(t)} - \tilde{\mathbf{x}}_i)\right)
-\]
-where $\mathcal{S}_\tau(x) = \text{sign}(x) \max(|x| - \tau, 0)$ is the soft-thresholding operator and $L$ is the Lipschitz constant (spectral norm of local Gram matrix). Each subproblem costs $O(k^3)$, yielding $O(Nk^3)$ total.
 
 \textbf{Phase 2 Optimization: Closed-Form Density Estimation.}
 
@@ -481,10 +469,10 @@ The complete optimization procedure is summarized in Algorithm \ref{alg:spock-op
    \caption{SPOCK Optimization Procedure}
    \label{alg:spock-opt}
 \begin{algorithmic}
-   \STATE {\bfseries Input:} $\{\mathbf{X}^{(v)}\}_{v=1}^V$, $K$, $k$, $M$, $\alpha$, $\beta$, $\gamma$, $\varepsilon$, $T_{\max}$.
+   \STATE {\bfseries Input:} $\{\mathbf{X}^{(v)}\}_{v=1}^V$, $K$, $k$, $M$, $\alpha$, $\varepsilon$, $T_{\max}$.
    \STATE {\bfseries Output:} Cluster assignments $\{y_i\}_{i=1}^N$.
    \STATE
-   \STATE \textcolor{blue}{\textbf{// Phase 1: Block Coordinate Descent}}
+   \STATE \textcolor{blue}{\textbf{// Phase 1: Randomized SVD + Laplacian Refinement}}
    \FOR{each view $v = 1, \ldots, V$}
        \STATE Build sparse $k$-NN graph $\mathbf{A}^{(v)}$, compute $\mathbf{L}^{(v)}$
        \STATE $\mathbf{P}^{(v)} \leftarrow$ RandomizedSVD$(\mathbf{X}^{(v)}, d)$ \hfill \textit{// $O(NDd)$}
@@ -493,10 +481,6 @@ The complete optimization procedure is summarized in Algorithm \ref{alg:spock-op
            \STATE $\mathbf{P}^{(v)} \leftarrow \text{QR}(\mathbf{P}^{(v)} - \eta \mathbf{G})$ \hfill \textit{// Re-orthogonalize}
        \ENDFOR
        \STATE $\tilde{\mathbf{X}}^{(v)} \leftarrow \mathbf{X}^{(v)}\mathbf{P}^{(v)}$
-       \FOR{each point $i = 1, \ldots, N$}
-           \STATE $\mathbf{w}_i \leftarrow$ ISTA$(\tilde{\mathbf{x}}_i, \tilde{\mathbf{X}}^{(v)}_{\mathcal{N}_k(i)}, \gamma)$ \hfill \textit{// $O(k^3)$}
-       \ENDFOR
-       \STATE $\mathbf{S}^{(v)} \leftarrow$ AssembleSparse$(\{\mathbf{w}_i\})$
    \ENDFOR
    \STATE
    \STATE \textcolor{blue}{\textbf{// Phase 2: Closed-Form View Weighting}}
@@ -545,7 +529,6 @@ We provide a detailed complexity analysis of SPOCK to demonstrate its scalabilit
 Sparse KNN Graph & $O(Nk\log N)$ & Ball Tree \\
 Randomized SVD & $O(NDd)$ & Random projection \\
 Laplacian Refinement & $O(Nkd)$ & Sparse $\mathbf{L} \times \mathbf{Z}$ \\
-Local Sparse Coding & $O(Nk^3)$ & ISTA per point \\
 \midrule
 \multicolumn{3}{l}{\textit{Phase 2: View Weighting (per view)}} \\
 $k$-NN Density & $O(Nk\log N)$ & Ball Tree \\
@@ -565,7 +548,7 @@ K-Means & $O(NKI)$ & $I$ iterations \\
 
 \textbf{Total Complexity.} Summing all components:
 \[
-\mathcal{O}\left(V \cdot N \cdot (D \cdot d + k \cdot \log N + k^3) + N \cdot (M \cdot T + k \cdot K)\right)
+\mathcal{O}\left(V \cdot N \cdot (D \cdot d + k \cdot \log N + k \cdot d) + N \cdot (M \cdot T + k \cdot K)\right)
 \]
 
 With typical parameters ($k \ll N$, $M \ll N$, $d \ll D$), this simplifies to:
