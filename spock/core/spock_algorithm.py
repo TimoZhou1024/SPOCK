@@ -1246,37 +1246,46 @@ class SPOCK:
         
         return T
     
-    # ==================== Phase 3: Hybrid Spectral + Feature Clustering ====================
+    # ==================== Phase 3: OT-Enhanced Spectral Clustering ====================
     
     def _phase3_hybrid_clustering(self, consensus_graph, projected_views, view_weights, n_samples):
         """
-        Phase 3: Hybrid Clustering - Spectral on feature-space graph.
+        Phase 3: OT-Enhanced Spectral Clustering.
         
-        Key insight: Instead of using consensus_graph (which loses information),
-        build a high-quality graph directly from the concatenated projected features
-        using OT-regularized KNN.
+        Key innovations:
+        1. Build KNN graph on concatenated features
+        2. Use Sinkhorn OT to compute soft cluster assignments
+        3. Enhance graph edges using OT transport plan
+        4. Spectral embedding on enhanced graph
+        
+        Complexity: O(N·k·log(N) + N·M·T) where M = landmarks, T = Sinkhorn iters
         """
         # Concatenate projected features (weighted)
         X_concat = np.zeros((n_samples, 0))
         for v, (X_v, w_v) in enumerate(zip(projected_views, view_weights)):
-            # Normalize each view
             X_v_norm = (X_v - X_v.mean(axis=0)) / (X_v.std(axis=0) + 1e-10)
             X_concat = np.hstack([X_concat, np.sqrt(w_v) * X_v_norm])
         
         if self.verbose:
-            print(f"  Building feature-space graph ({X_concat.shape[1]} dims)...")
+            print(f"  Building KNN graph ({X_concat.shape[1]} dims)...")
         
-        # Build high-quality KNN graph on concatenated features
-        W_feature = self._build_ot_regularized_graph(X_concat)
+        # Step 1: Build base KNN graph
+        W_base, knn_indices, knn_distances, density = self._build_knn_graph_with_info(X_concat)
         
-        # Compute spectral embedding
+        if self.verbose:
+            print(f"  Computing OT-enhanced graph...")
+        
+        # Step 2: OT enhancement using landmark-based Sinkhorn
+        W_enhanced = self._ot_enhance_graph(X_concat, W_base, knn_indices, density)
+        
+        # Step 3: Spectral embedding
         if self.verbose:
             print(f"  Computing spectral embedding...")
-        Z_spectral = self._standard_spectral_embedding(W_feature)
+        Z_spectral = self._standard_spectral_embedding(W_enhanced)
         
         self.spectral_embedding_ = Z_spectral
         
-        # K-Means on spectral embedding
+        # Step 4: K-Means clustering
         best_labels = None
         best_inertia = float('inf')
         
@@ -1296,29 +1305,32 @@ class SPOCK:
         
         return best_labels
     
-    def _build_ot_regularized_graph(self, X):
+    def _build_knn_graph_with_info(self, X):
         """
-        Build SPARSE similarity graph using density-regularized KNN.
+        Build KNN graph and return additional info for OT enhancement.
         
-        Complexity: O(N·k·log(N)) for KNN + O(N·k) for graph
-        Space: O(N·k) sparse matrix
+        Returns:
+            W_sparse: Sparse adjacency matrix
+            indices: KNN indices
+            distances: KNN distances  
+            density: Local density estimates
         """
         N = X.shape[0]
         k = min(self.k_neighbors * 2, N - 1)
         
-        # Fast KNN: O(N·log(N)·D)
+        # KNN search
         nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='ball_tree').fit(X)
         distances, indices = nbrs.kneighbors(X)
         
-        # Adaptive sigma per point
+        # Adaptive bandwidth
         sigma_i = distances[:, self.k_neighbors]
         sigma_i = np.maximum(sigma_i, 1e-10)
         
-        # Local density: O(N·k)
+        # Density estimation
         density = 1.0 / (np.mean(distances[:, 1:self.k_neighbors+1], axis=1) + 1e-10)
         density = (density - density.min()) / (density.max() - density.min() + 1e-10)
         
-        # Build SPARSE graph: O(N·k)
+        # Build sparse graph
         row_idx = []
         col_idx = []
         data = []
@@ -1328,28 +1340,159 @@ class SPOCK:
                 j = indices[i, j_idx]
                 dist = distances[i, j_idx]
                 
-                # Adaptive heat kernel
                 sigma_ij = (sigma_i[i] + sigma_i[j]) / 2
                 w_heat = np.exp(-dist**2 / (2 * sigma_ij**2))
                 
-                # Density-aware correction
-                density_sim = 1.0 - np.abs(density[i] - density[j])
-                w_density = 0.5 + 0.5 * density_sim
-                
-                weight = w_heat * w_density
                 row_idx.append(i)
                 col_idx.append(j)
-                data.append(weight)
+                data.append(w_heat)
         
-        # Sparse matrix
-        W_sparse = sparse.csr_matrix(
-            (data, (row_idx, col_idx)), shape=(N, N)
-        )
-        
-        # Symmetrize
+        W_sparse = sparse.csr_matrix((data, (row_idx, col_idx)), shape=(N, N))
         W_sparse = (W_sparse + W_sparse.T) / 2
         
-        return W_sparse
+        return W_sparse, indices, distances, density
+    
+    def _ot_enhance_graph(self, X, W_base, knn_indices, density):
+        """
+        Enhance graph using Optimal Transport - Additive approach.
+        
+        Key insight: Add OT-based similarity as a second term rather than multiplicative.
+        This preserves the base graph structure better.
+        
+        Complexity: O(N·M·T) where M << N
+        """
+        N = X.shape[0]
+        M = min(self.n_clusters * 10, N // 5, 200)
+        
+        # Step 1: Select landmarks using density-weighted k-means++
+        landmarks = self._select_ot_landmarks(X, density, M)
+        X_landmarks = X[landmarks]
+        
+        # Step 2: Compute cost matrix
+        C = np.zeros((N, M))
+        for m in range(M):
+            diff = X - X_landmarks[m]
+            C[:, m] = np.sum(diff**2, axis=1)
+        
+        # Normalization
+        C_med = np.median(C)
+        C = C / (C_med + 1e-10)
+        
+        # Step 3: Sinkhorn algorithm
+        reg = 0.05
+        T = self._sinkhorn_points_to_landmarks(C, reg, n_iter=80)
+        
+        # Step 4: Normalize transport profiles
+        T_norm = T / (np.linalg.norm(T, axis=1, keepdims=True) + 1e-10)
+        
+        # Step 5: Get sparse graph structure
+        W_base_coo = W_base.tocoo()
+        rows = W_base_coo.row
+        cols = W_base_coo.col
+        vals = W_base_coo.data.copy()
+        
+        # Step 6: Compute OT similarity for edges
+        ot_sims = np.sum(T_norm[rows] * T_norm[cols], axis=1)
+        
+        # Step 7: Density similarity
+        density_sims = 1.0 - np.abs(density[rows] - density[cols])
+        
+        # Step 8: Original density correction
+        density_factor = 0.5 + 0.5 * density_sims
+        
+        # Step 9: Slightly larger additive OT bonus for high-similarity pairs
+        ot_bonus = 0.06 * np.maximum(0, ot_sims - 0.5)  # Only positive bonus
+        
+        # Combined: multiplicative density + additive OT
+        boost = density_factor + ot_bonus
+        
+        vals = vals * boost
+        
+        # Reconstruct sparse matrix
+        W_enhanced = sparse.csr_matrix((vals, (rows, cols)), shape=(N, N))
+        W_enhanced = (W_enhanced + W_enhanced.T) / 2
+        
+        return W_enhanced
+    
+    def _select_ot_landmarks(self, X, density, M):
+        """
+        Select landmarks for OT computation.
+        
+        Strategy: Prefer high-density points (cluster cores) with good coverage.
+        Uses k-means++ style selection weighted by density.
+        """
+        N = X.shape[0]
+        
+        # Weight by density (prefer cluster cores)
+        weights = density ** 2
+        weights = weights / weights.sum()
+        
+        # First landmark: highest density point
+        landmarks = [np.argmax(density)]
+        
+        # Remaining landmarks: k-means++ style
+        for _ in range(M - 1):
+            # Distance to nearest landmark
+            min_dists = np.full(N, np.inf)
+            for l in landmarks:
+                dists = np.sum((X - X[l])**2, axis=1)
+                min_dists = np.minimum(min_dists, dists)
+            
+            # Probability proportional to distance * density
+            probs = min_dists * weights
+            probs[landmarks] = 0
+            probs = probs / (probs.sum() + 1e-10)
+            
+            # Sample next landmark
+            next_l = np.random.choice(N, p=probs)
+            landmarks.append(next_l)
+        
+        return np.array(landmarks)
+    
+    def _sinkhorn_points_to_landmarks(self, C, reg, n_iter=50):
+        """
+        Sinkhorn algorithm for points-to-landmarks transport.
+        
+        Solves: min <T, C> + reg * H(T)
+        s.t. T @ 1 = a (row sums)
+             T.T @ 1 = b (col sums)
+        
+        With a = 1/N (uniform over points), b = 1/M (uniform over landmarks)
+        
+        Complexity: O(N·M·n_iter)
+        """
+        N, M = C.shape
+        
+        # Uniform marginals
+        a = np.ones(N) / N
+        b = np.ones(M) / M
+        
+        # Gibbs kernel
+        K = np.exp(-C / reg)
+        
+        # Sinkhorn iterations
+        u = np.ones(N)
+        v = np.ones(M)
+        
+        for _ in range(n_iter):
+            # Update v
+            Ktu = K.T @ u
+            v = b / (Ktu + 1e-100)
+            
+            # Update u  
+            Kv = K @ v
+            u = a / (Kv + 1e-100)
+            
+            # Check for numerical issues
+            if np.any(np.isnan(u)) or np.any(np.isnan(v)):
+                u = np.ones(N)
+                v = np.ones(M)
+                break
+        
+        # Transport plan
+        T = u[:, np.newaxis] * K * v[np.newaxis, :]
+        
+        return T
     
     def _phase3_clustering(self, consensus_graph, n_samples):
         """
