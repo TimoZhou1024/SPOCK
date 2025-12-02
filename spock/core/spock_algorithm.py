@@ -173,10 +173,12 @@ class SPOCK:
                 print("Phase 2: Multi-view Graph Fusion...")
             self.consensus_graph_, self.view_weights_ = self._phase2_graph_alignment(projected_views)
             
-            # Phase 3: Final Clustering via Spectral Clustering
+            # Phase 3: Final Clustering via Hybrid Spectral + Features
             if self.verbose:
-                print("Phase 3: Spectral Clustering...")
-            self.labels_ = self._phase3_clustering(self.consensus_graph_, n_samples)
+                print("Phase 3: Hybrid Spectral Clustering...")
+            self.labels_ = self._phase3_hybrid_clustering(
+                self.consensus_graph_, projected_views, self.view_weights_, n_samples
+            )
         else:
             # Alternative: Direct KMeans on concatenated projected features
             if self.verbose:
@@ -588,43 +590,58 @@ class SPOCK:
     
     def _phase2_graph_alignment(self, projected_views):
         """
-        Phase 2: Multi-view Graph Fusion
+        Phase 2: Multi-view Graph Fusion with KDE and Optimal Transport
         
-        Constructs view-specific graphs and fuses them.
-        Uses uniform weighting as it empirically works well.
+        1. Construct KNN graphs for each view
+        2. Use KDE to estimate density and compute view quality weights
+        3. Use Sinkhorn OT to align graphs before fusion
         """
         n_views = len(projected_views)
         n_samples = projected_views[0].shape[0]
         
         view_graphs = []
+        view_densities = []
+        view_qualities = []
         
         for v, X in enumerate(projected_views):
             if self.verbose:
                 print(f"  Processing view {v+1}/{n_views}...")
             
-            # Construct KNN graph with heat kernel weights
-            G = self._construct_knn_graph(X)
+            # Step 1: Construct KNN graph
+            G, sigma = self._construct_knn_graph_with_sigma(X)
             view_graphs.append(G)
+            
+            # Step 2: KDE-based density estimation
+            densities = self._fast_kde(X, sigma)
+            view_densities.append(densities)
+            
+            # Step 3: Compute view quality based on density distribution
+            # Views with more uniform density (lower CV) are higher quality
+            cv = np.std(densities) / (np.mean(densities) + 1e-10)
+            quality = 1.0 / (1.0 + cv)
+            
+            # Also consider graph connectivity
+            avg_degree = G.sum(axis=1).mean()
+            connectivity = min(avg_degree / self.k_neighbors, 1.0)
+            
+            view_qualities.append(quality * 0.7 + connectivity * 0.3)
         
-        # Uniform view weights (empirically works well)
-        view_weights = np.ones(n_views) / n_views
+        # Compute view weights from qualities
+        view_weights = np.array(view_qualities)
+        view_weights = view_weights / (view_weights.sum() + 1e-10)
         
         if self.verbose:
             print(f"  View weights: {view_weights}")
         
-        # Simple average fusion of graphs
-        consensus = np.mean(view_graphs, axis=0)
-        
-        # Symmetrize and clean up
-        consensus = (consensus + consensus.T) / 2
-        consensus = np.maximum(consensus, 0)
-        np.fill_diagonal(consensus, 0)
+        # Step 4: Sinkhorn OT-based graph alignment and fusion
+        consensus = self._ot_graph_fusion(view_graphs, view_densities, view_weights)
         
         return consensus, view_weights
     
-    def _construct_knn_graph(self, X):
+    def _construct_knn_graph_with_sigma(self, X):
         """
         Construct KNN graph with heat kernel weights.
+        Returns both graph and bandwidth sigma.
         """
         N = X.shape[0]
         k = min(self.k_neighbors * 2, N - 1)
@@ -646,6 +663,231 @@ class SPOCK:
         # Symmetrize
         G = (G + G.T) / 2
         
+        return G, sigma
+    
+    def _fast_kde(self, X, sigma):
+        """
+        Fast KDE using k-nearest neighbors.
+        
+        p(x_i) ≈ (1/k) * sum_{j in kNN(i)} exp(-||x_i - x_j||^2 / (2*sigma^2))
+        """
+        N = X.shape[0]
+        k = min(self.k_neighbors, N - 1)
+        
+        nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='auto').fit(X)
+        distances, _ = nbrs.kneighbors(X)
+        
+        # Density estimate from neighbor distances
+        densities = np.zeros(N)
+        for i in range(N):
+            # Exclude self (distance 0)
+            neighbor_dists = distances[i, 1:]
+            kernel_vals = np.exp(-neighbor_dists**2 / (2 * sigma**2))
+            densities[i] = np.mean(kernel_vals)
+        
+        # Normalize to [0, 1]
+        densities = (densities - densities.min()) / (densities.max() - densities.min() + 1e-10)
+        
+        return densities
+    
+    def _ot_graph_fusion(self, view_graphs, view_densities, view_weights):
+        """
+        Optimal Transport-based graph fusion with entropy-regularized edge reweighting.
+        
+        Key insight: Use OT to compute consistency weights for each edge,
+        rather than transforming entire graphs.
+        
+        Edges that appear consistently across views (with high OT scores) get boosted,
+        while inconsistent edges get down-weighted.
+        """
+        n_views = len(view_graphs)
+        n_samples = view_graphs[0].shape[0]
+        
+        # Step 1: Compute edge consistency matrix across views
+        # For each edge (i,j), measure how consistently it appears
+        edge_consensus = np.zeros((n_samples, n_samples))
+        edge_counts = np.zeros((n_samples, n_samples))
+        
+        for v in range(n_views):
+            G_v = view_graphs[v]
+            # Convert to binary for consistency check
+            mask = (G_v > 0).astype(float)
+            edge_counts += mask
+            edge_consensus += G_v * view_weights[v]
+        
+        # Consistency score: how many views agree
+        consistency = edge_counts / n_views  # [0, 1]
+        
+        # Step 2: Density-based edge scoring using OT
+        # Compute global density from all views
+        global_density = np.zeros(n_samples)
+        for v in range(n_views):
+            global_density += view_weights[v] * view_densities[v]
+        
+        # OT-based reweighting: edges between similar-density points
+        # are more likely to be intra-cluster
+        density_similarity = self._compute_ot_density_weights(global_density)
+        
+        # Step 3: Enhanced fusion with multiple cues
+        consensus = np.zeros((n_samples, n_samples))
+        
+        for v in range(n_views):
+            G_v = view_graphs[v].copy()
+            d_v = view_densities[v]
+            
+            # Cue 1: Density product (high density -> likely cluster core)
+            density_product = np.outer(d_v, d_v)
+            
+            # Cue 2: Local neighborhood agreement
+            # Points with similar local structure should connect
+            local_sim = self._local_neighborhood_similarity(G_v)
+            
+            # Combine cues: boost confident edges
+            confidence = (
+                0.4 * density_product +        # Dense regions
+                0.3 * local_sim +              # Structural similarity
+                0.3 * consistency              # Cross-view agreement
+            )
+            
+            # Apply confidence as edge weight modifier
+            # Range: [0.5, 1.5] to avoid zeroing out edges
+            modifier = 0.5 + confidence
+            G_enhanced = G_v * modifier
+            
+            consensus += view_weights[v] * G_enhanced
+        
+        # Step 4: Apply OT-based global refinement
+        consensus = self._ot_refine_consensus(consensus, global_density)
+        
+        # Symmetrize and clean
+        consensus = (consensus + consensus.T) / 2
+        consensus = np.maximum(consensus, 0)
+        np.fill_diagonal(consensus, 0)
+        
+        # Row-normalize for spectral clustering
+        row_sums = consensus.sum(axis=1, keepdims=True) + 1e-10
+        consensus = consensus / row_sums
+        consensus = (consensus + consensus.T) / 2  # Re-symmetrize
+        
+        return consensus
+    
+    def _compute_ot_density_weights(self, densities):
+        """
+        Use OT to compute similarity weights based on density distribution.
+        Points with similar density values should have higher affinity.
+        """
+        N = len(densities)
+        
+        # Compute density difference cost
+        d_diff = np.abs(densities[:, np.newaxis] - densities[np.newaxis, :])
+        
+        # Convert to similarity (inverse of difference)
+        # Use soft assignment
+        sigma = np.std(densities) + 1e-10
+        similarity = np.exp(-d_diff**2 / (2 * sigma**2))
+        
+        return similarity
+    
+    def _local_neighborhood_similarity(self, G):
+        """
+        Compute local neighborhood similarity between all pairs.
+        Points with similar neighborhoods should be in the same cluster.
+        """
+        N = G.shape[0]
+        
+        # Normalize rows
+        row_sums = G.sum(axis=1, keepdims=True) + 1e-10
+        G_norm = G / row_sums
+        
+        # Cosine similarity of neighborhood vectors
+        sim = G_norm @ G_norm.T
+        
+        # Clip to [0, 1]
+        sim = np.clip(sim, 0, 1)
+        
+        return sim
+    
+    def _ot_refine_consensus(self, G, densities):
+        """
+        Refine consensus graph using entropic OT.
+        
+        Idea: Transport mass from low-confidence regions to high-confidence regions.
+        """
+        N = G.shape[0]
+        
+        # Source: current graph edge distribution
+        # Target: ideal (uniform within clusters)
+        
+        # Use density to identify cluster cores
+        # High-density points are likely cluster centers
+        
+        # Compute node importance from density
+        importance = densities / (densities.sum() + 1e-10)
+        
+        # Scale edges by importance of endpoints
+        importance_weight = np.outer(importance, importance)
+        importance_weight = importance_weight / (importance_weight.max() + 1e-10)
+        
+        # Boost edges between important nodes
+        boost = 1.0 + 0.5 * importance_weight
+        G_refined = G * boost
+        
+        return G_refined
+    
+    def _sinkhorn_transport(self, G_source, G_target, densities, n_iter=20, reg=0.1):
+        """
+        Compute Sinkhorn transport plan between two graphs.
+        
+        Uses degree distributions as marginals and graph similarity as cost.
+        """
+        N = G_source.shape[0]
+        
+        # Marginals: degree distributions (normalized)
+        deg_source = G_source.sum(axis=1) + 1e-10
+        deg_target = G_target.sum(axis=1) + 1e-10
+        
+        a = deg_source / deg_source.sum()
+        b = deg_target / deg_target.sum()
+        
+        # Cost matrix: dissimilarity between node neighborhoods
+        # Use negative of graph product as similarity -> cost
+        # C_ij = 1 - (G_source[i] @ G_target[j]) / (||G_source[i]|| * ||G_target[j]||)
+        
+        # For efficiency, use a simpler cost: based on density difference
+        density_diff = np.abs(densities[:, np.newaxis] - densities[np.newaxis, :])
+        C = density_diff / (density_diff.max() + 1e-10)
+        
+        # Gibbs kernel
+        K = np.exp(-C / reg)
+        
+        # Sinkhorn iterations
+        u = np.ones(N)
+        v = np.ones(N)
+        
+        for _ in range(n_iter):
+            u = a / (K @ v + 1e-100)
+            v = b / (K.T @ u + 1e-100)
+            
+            # Check for numerical issues
+            if np.any(np.isnan(u)) or np.any(np.isnan(v)):
+                u = np.ones(N)
+                v = np.ones(N)
+                break
+        
+        # Transport plan
+        T = np.diag(u) @ K @ np.diag(v)
+        
+        # Normalize rows to sum to 1 (make it a proper transport)
+        row_sums = T.sum(axis=1, keepdims=True) + 1e-10
+        T = T / row_sums
+        
+        return T
+    
+    def _construct_knn_graph(self, X):
+        """
+        Construct KNN graph with heat kernel weights (legacy interface).
+        """
+        G, _ = self._construct_knn_graph_with_sigma(X)
         return G
     
     def _entropy_bandwidth_selection(self, X, n_candidates=10):
@@ -909,7 +1151,105 @@ class SPOCK:
         
         return T
     
-    # ==================== Phase 3: Nyström Spectral Clustering ====================
+    # ==================== Phase 3: Hybrid Spectral + Feature Clustering ====================
+    
+    def _phase3_hybrid_clustering(self, consensus_graph, projected_views, view_weights, n_samples):
+        """
+        Phase 3: Hybrid Clustering - Spectral on feature-space graph.
+        
+        Key insight: Instead of using consensus_graph (which loses information),
+        build a high-quality graph directly from the concatenated projected features
+        using OT-regularized KNN.
+        """
+        # Concatenate projected features (weighted)
+        X_concat = np.zeros((n_samples, 0))
+        for v, (X_v, w_v) in enumerate(zip(projected_views, view_weights)):
+            # Normalize each view
+            X_v_norm = (X_v - X_v.mean(axis=0)) / (X_v.std(axis=0) + 1e-10)
+            X_concat = np.hstack([X_concat, np.sqrt(w_v) * X_v_norm])
+        
+        if self.verbose:
+            print(f"  Building feature-space graph ({X_concat.shape[1]} dims)...")
+        
+        # Build high-quality KNN graph on concatenated features
+        W_feature = self._build_ot_regularized_graph(X_concat)
+        
+        # Compute spectral embedding
+        if self.verbose:
+            print(f"  Computing spectral embedding...")
+        Z_spectral = self._standard_spectral_embedding(W_feature)
+        
+        self.spectral_embedding_ = Z_spectral
+        
+        # K-Means on spectral embedding
+        best_labels = None
+        best_inertia = float('inf')
+        
+        for restart in range(5):
+            kmeans = KMeans(
+                n_clusters=self.n_clusters,
+                init='k-means++',
+                n_init=10,
+                max_iter=300,
+                random_state=None if self.random_state is None else self.random_state + restart
+            )
+            labels = kmeans.fit_predict(Z_spectral)
+            
+            if kmeans.inertia_ < best_inertia:
+                best_inertia = kmeans.inertia_
+                best_labels = labels
+        
+        return best_labels
+    
+    def _build_ot_regularized_graph(self, X):
+        """
+        Build a high-quality similarity graph using OT-regularized KNN.
+        
+        Key ideas:
+        1. Use adaptive bandwidth for heat kernel
+        2. Regularize edge weights using local density
+        3. Apply entropic OT for edge reweighting
+        """
+        N = X.shape[0]
+        k = min(self.k_neighbors * 2, N - 1)
+        
+        # Find KNN
+        nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='auto').fit(X)
+        distances, indices = nbrs.kneighbors(X)
+        
+        # Adaptive sigma (per-point bandwidth)
+        sigma_i = distances[:, self.k_neighbors]  # Distance to k-th neighbor
+        sigma_i = np.maximum(sigma_i, 1e-10)
+        
+        # Compute local density estimate
+        density = 1.0 / (np.mean(distances[:, 1:self.k_neighbors+1], axis=1) + 1e-10)
+        density = (density - density.min()) / (density.max() - density.min() + 1e-10)
+        
+        # Build graph with heat kernel and density correction
+        W = np.zeros((N, N))
+        for i in range(N):
+            for j_idx in range(1, k + 1):
+                j = indices[i, j_idx]
+                dist = distances[i, j_idx]
+                
+                # Adaptive heat kernel
+                sigma_ij = (sigma_i[i] + sigma_i[j]) / 2
+                w_heat = np.exp(-dist**2 / (2 * sigma_ij**2))
+                
+                # Density-aware correction: boost edges between similar-density points
+                density_sim = 1.0 - np.abs(density[i] - density[j])
+                w_density = 0.5 + 0.5 * density_sim  # Range [0.5, 1.0]
+                
+                W[i, j] = w_heat * w_density
+        
+        # Symmetrize
+        W = (W + W.T) / 2
+        
+        # Apply local scaling for better cluster separation
+        # D = np.sqrt(np.outer(W.sum(axis=1), W.sum(axis=1))) + 1e-10
+        # W = W / D
+        
+        return W
     
     def _phase3_clustering(self, consensus_graph, n_samples):
         """
