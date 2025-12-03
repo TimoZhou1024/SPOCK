@@ -37,6 +37,7 @@ venv.bak/
 # Project specific
 data/
 results/
+pre/
 *.log
 *.csv
 uv.lock
@@ -57,3 +58,6 @@ uv.lock
 *.snm
 *.vrb
 main.log
+
+# claude
+.claude/

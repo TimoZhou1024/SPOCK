@@ -225,9 +225,10 @@ SPOCK is compared against several multi-view clustering baselines:
 |--------|-------------|
 | **Concat+KMeans** | Concatenate views + K-Means |
 | **Concat+Spectral** | Concatenate views + Spectral Clustering |
-| **MVSC** | Multi-View Spectral Clustering |
+| **Best-View** | Best single-view Spectral Clustering |
 | **Co-Reg** | Co-Regularized Spectral Clustering |
 | **MV-KMeans** | Multi-View K-Means |
+| **MVSC** | Multi-View Spectral Clustering |
 | **LMvSC** | Large-scale Multi-View Subspace Clustering |
 | **MLAN** | Multi-View Learning with Adaptive Neighbors |
 

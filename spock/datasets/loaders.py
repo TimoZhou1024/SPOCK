@@ -205,42 +205,220 @@ def load_scene15(data_path='./data'):
     """
     Load Scene-15 dataset.
     
-    3 views: PHOG, Gist, LBP.
+    Supports two formats:
+    1. Pre-extracted features: Scene15.mat (3 views: PHOG, Gist, LBP)
+    2. Raw images: 15-Scene/ folder with subfolders 00-14
+       - Extracts features using: Histogram, Edge, Color statistics
+    
     4485 samples, 15 scene categories.
     """
     dataset = MultiViewDataset('Scene15')
     
-    file_path = os.path.join(data_path, 'Scene15.mat')
+    mat_file_path = os.path.join(data_path, 'Scene15.mat')
+    image_dir = os.path.join(data_path, '15-Scene')
     
-    if not os.path.exists(file_path):
-        print(f"Warning: {file_path} not found. Generating synthetic data.")
-        return _generate_synthetic_multiview(
-            n_samples=4485, n_clusters=15, n_views=3,
-            view_dims=[59, 20, 40], name='Scene15'
-        )
+    # Try loading from .mat file first
+    if os.path.exists(mat_file_path):
+        data = loadmat(mat_file_path)
+        
+        if 'X' in data:
+            views = data['X'].flatten()
+            dataset.views = [np.array(v) for v in views]
+            dataset.labels = data['Y'].flatten().astype(int)
+        else:
+            for key in sorted(data.keys()):
+                if not key.startswith('_'):
+                    if isinstance(data[key], np.ndarray) and len(data[key].shape) == 2:
+                        if data[key].shape[0] > data[key].shape[1]:
+                            dataset.views.append(np.array(data[key]))
+            dataset.labels = data.get('Y', data.get('gnd', data.get('gt'))).flatten().astype(int)
+        
+        if dataset.labels.min() == 1:
+            dataset.labels -= 1
+        
+        dataset.n_views = len(dataset.views)
+        dataset.n_samples = dataset.views[0].shape[0]
+        dataset.n_clusters = len(np.unique(dataset.labels))
+        
+        return dataset
     
-    data = loadmat(file_path)
+    # Try loading from image directory
+    if os.path.isdir(image_dir):
+        try:
+            return _load_scene15_from_images(image_dir)
+        except Exception as e:
+            print(f"Warning: Failed to load Scene15 from images: {e}")
     
-    if 'X' in data:
-        views = data['X'].flatten()
-        dataset.views = [np.array(v) for v in views]
-        dataset.labels = data['Y'].flatten().astype(int)
-    else:
-        for key in sorted(data.keys()):
-            if not key.startswith('_'):
-                if isinstance(data[key], np.ndarray) and len(data[key].shape) == 2:
-                    if data[key].shape[0] > data[key].shape[1]:
-                        dataset.views.append(np.array(data[key]))
-        dataset.labels = data.get('Y', data.get('gnd', data.get('gt'))).flatten().astype(int)
+    # Fallback: generate synthetic data
+    print(f"Warning: Scene15 data not found. Generating synthetic data.")
+    return _generate_synthetic_multiview(
+        n_samples=4485, n_clusters=15, n_views=3,
+        view_dims=[59, 20, 40], name='Scene15'
+    )
+
+
+def _load_scene15_from_images(image_dir):
+    """
+    Load Scene-15 from raw image files and extract multi-view features.
     
-    if dataset.labels.min() == 1:
-        dataset.labels -= 1
+    Views extracted:
+    1. Intensity histogram (256-dim)
+    2. Edge histogram using Sobel (64-dim) 
+    3. Color statistics (mean, std, skewness per channel) + spatial grid (45-dim)
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        raise ImportError("PIL/Pillow is required to load images. Install with: pip install Pillow")
     
-    dataset.n_views = len(dataset.views)
-    dataset.n_samples = dataset.views[0].shape[0]
-    dataset.n_clusters = len(np.unique(dataset.labels))
+    dataset = MultiViewDataset('Scene15')
+    
+    # Find all class folders (00-14)
+    class_folders = sorted([d for d in os.listdir(image_dir) 
+                           if os.path.isdir(os.path.join(image_dir, d)) and d.isdigit()])
+    
+    if len(class_folders) == 0:
+        raise ValueError(f"No class folders found in {image_dir}")
+    
+    print(f"Loading Scene15 from images: {len(class_folders)} classes found")
+    
+    all_features_v1 = []  # Intensity histogram
+    all_features_v2 = []  # Edge features
+    all_features_v3 = []  # Color/spatial features
+    all_labels = []
+    
+    for class_idx, folder in enumerate(class_folders):
+        folder_path = os.path.join(image_dir, folder)
+        image_files = sorted([f for f in os.listdir(folder_path) 
+                             if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))])
+        
+        print(f"  Class {class_idx} ({folder}): {len(image_files)} images")
+        
+        for img_file in image_files:
+            img_path = os.path.join(folder_path, img_file)
+            try:
+                img = Image.open(img_path)
+                
+                # Resize to standard size for consistent features
+                img = img.resize((128, 128))
+                
+                # Convert to numpy array
+                img_array = np.array(img)
+                
+                # Extract View 1: Intensity histogram (grayscale)
+                if len(img_array.shape) == 3:
+                    gray = np.mean(img_array, axis=2)
+                else:
+                    gray = img_array.astype(float)
+                hist_v1, _ = np.histogram(gray.flatten(), bins=64, range=(0, 256), density=True)
+                all_features_v1.append(hist_v1)
+                
+                # Extract View 2: Edge features (Sobel-like)
+                edge_features = _extract_edge_features(gray)
+                all_features_v2.append(edge_features)
+                
+                # Extract View 3: Color/spatial statistics
+                color_features = _extract_color_spatial_features(img_array)
+                all_features_v3.append(color_features)
+                
+                all_labels.append(class_idx)
+                
+            except Exception as e:
+                print(f"    Warning: Failed to process {img_file}: {e}")
+                continue
+    
+    if len(all_labels) == 0:
+        raise ValueError("No images were successfully loaded")
+    
+    dataset.views = [
+        np.array(all_features_v1, dtype=np.float64),
+        np.array(all_features_v2, dtype=np.float64),
+        np.array(all_features_v3, dtype=np.float64),
+    ]
+    dataset.labels = np.array(all_labels, dtype=int)
+    dataset.n_views = 3
+    dataset.n_samples = len(all_labels)
+    dataset.n_clusters = len(class_folders)
+    
+    print(f"Loaded Scene15: {dataset.n_samples} samples, {dataset.n_views} views, "
+          f"{dataset.n_clusters} clusters, dims={[v.shape[1] for v in dataset.views]}")
     
     return dataset
+
+
+def _extract_edge_features(gray_img):
+    """Extract edge histogram features using simple gradient operators."""
+    # Simple Sobel-like kernels
+    # Horizontal gradient
+    gx = np.zeros_like(gray_img, dtype=float)
+    gx[:, 1:-1] = gray_img[:, 2:] - gray_img[:, :-2]
+    
+    # Vertical gradient
+    gy = np.zeros_like(gray_img, dtype=float)
+    gy[1:-1, :] = gray_img[2:, :] - gray_img[:-2, :]
+    
+    # Gradient magnitude and direction
+    magnitude = np.sqrt(gx**2 + gy**2)
+    direction = np.arctan2(gy, gx)
+    
+    # Edge histogram: 8 direction bins x 4x4 spatial grid = 128 dims
+    n_dir_bins = 8
+    n_spatial = 4
+    
+    h, w = gray_img.shape
+    cell_h, cell_w = h // n_spatial, w // n_spatial
+    
+    features = []
+    for i in range(n_spatial):
+        for j in range(n_spatial):
+            cell_mag = magnitude[i*cell_h:(i+1)*cell_h, j*cell_w:(j+1)*cell_w]
+            cell_dir = direction[i*cell_h:(i+1)*cell_h, j*cell_w:(j+1)*cell_w]
+            
+            # Histogram of gradient directions weighted by magnitude
+            hist, _ = np.histogram(cell_dir.flatten(), bins=n_dir_bins, 
+                                  range=(-np.pi, np.pi), weights=cell_mag.flatten())
+            # Normalize
+            hist = hist / (np.sum(hist) + 1e-10)
+            features.extend(hist)
+    
+    return np.array(features)
+
+
+def _extract_color_spatial_features(img_array):
+    """Extract color and spatial statistics features."""
+    features = []
+    
+    # Ensure 3 channels
+    if len(img_array.shape) == 2:
+        img_array = np.stack([img_array] * 3, axis=2)
+    elif img_array.shape[2] == 4:  # RGBA
+        img_array = img_array[:, :, :3]
+    
+    # Global color statistics (mean, std for each channel)
+    for c in range(3):
+        channel = img_array[:, :, c].astype(float)
+        features.append(np.mean(channel) / 255.0)
+        features.append(np.std(channel) / 255.0)
+    
+    # Spatial grid statistics (3x3 grid, mean intensity per cell)
+    h, w = img_array.shape[:2]
+    gray = np.mean(img_array, axis=2)
+    
+    n_grid = 3
+    cell_h, cell_w = h // n_grid, w // n_grid
+    
+    for i in range(n_grid):
+        for j in range(n_grid):
+            cell = gray[i*cell_h:(i+1)*cell_h, j*cell_w:(j+1)*cell_w]
+            features.append(np.mean(cell) / 255.0)
+            features.append(np.std(cell) / 255.0)
+    
+    # Color histogram (simplified: 8 bins per channel)
+    for c in range(3):
+        hist, _ = np.histogram(img_array[:, :, c].flatten(), bins=8, range=(0, 256), density=True)
+        features.extend(hist)
+    
+    return np.array(features)
 
 
 def load_reuters(data_path='./data'):
