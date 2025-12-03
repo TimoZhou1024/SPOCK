@@ -1422,10 +1422,9 @@ class SPOCK:
         # tau is similarity threshold - only pairs with sim > tau receive bonus
         ot_bonus = self.gamma * np.maximum(0, ot_sims - self.tau)
         
-        # Combined: multiplicative density + additive OT (additive fusion per paper)
-        boost = density_factor + ot_bonus
-        
-        vals = vals * boost
+        # Combined: W' = W * density_factor + ot_bonus (additive fusion per paper)
+        # This is ADDITIVE: local structure (W * density) + global OT bonus
+        vals = vals * density_factor + ot_bonus
         
         # Reconstruct sparse matrix
         W_enhanced = sparse.csr_matrix((vals, (rows, cols)), shape=(N, N))
