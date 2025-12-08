@@ -93,7 +93,8 @@ def run_experiments(dataset_name, n_runs=10, save_dir='./results', random_seed=4
         rff_dim=256,
         n_landmarks=min(500, dataset.n_samples // 2),
         random_state=random_seed,
-        verbose=False
+        verbose=False,
+        use_spectral=True
     )
     methods['SPOCK'] = spock
     
