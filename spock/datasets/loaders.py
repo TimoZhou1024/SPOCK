@@ -181,14 +181,20 @@ def load_caltech101(data_path='./data', n_classes=7):
     data = loadmat(file_path)
     
     # Extract views and labels
-    if 'X' in data:
+    # Handle Caltech101 specific format: data['data'] contains the views
+    if 'data' in data:
+        # 'data' is a (1, 6) cell array containing 6 view matrices
+        data_cell = data['data'].flatten()  # Convert to 1D array of objects
+        dataset.views = [np.array(v, dtype=np.float32) for v in data_cell]
+        dataset.labels = data['Y'].flatten().astype(int)
+    elif 'X' in data:
         views = data['X'].flatten()
-        dataset.views = [np.array(v) for v in views]
+        dataset.views = [np.array(v, dtype=np.float32) for v in views]
         dataset.labels = data['Y'].flatten().astype(int)
     else:
         for key in sorted(data.keys()):
             if 'fea' in key.lower() or key.startswith('X'):
-                dataset.views.append(np.array(data[key]))
+                dataset.views.append(np.array(data[key], dtype=np.float32))
         dataset.labels = data.get('Y', data.get('gnd')).flatten().astype(int)
     
     if dataset.labels.min() == 1:
@@ -619,7 +625,7 @@ def load_nuswide(data_path='./data'):
     """
     dataset = MultiViewDataset('NUS-WIDE')
     
-    file_path = os.path.join(data_path, 'NUSWide.mat')
+    file_path = os.path.join(data_path, 'NUSWIDE.mat')
     
     if not os.path.exists(file_path):
         print(f"Warning: {file_path} not found. Generating synthetic data.")
@@ -630,10 +636,17 @@ def load_nuswide(data_path='./data'):
     
     data = loadmat(file_path)
     
-    if 'X' in data:
+    # NUSwide format: 'fea' contains views, 'gt' contains labels
+    if 'fea' in data and 'gt' in data:
+        fea_cell = data['fea'].flatten()  # (1, 5) cell array
+        dataset.views = [np.array(v, dtype=np.float32) for v in fea_cell]
+        dataset.labels = data['gt'].flatten().astype(int)
+    elif 'X' in data:
         views = data['X'].flatten()
-        dataset.views = [np.array(v) for v in views]
+        dataset.views = [np.array(v, dtype=np.float32) for v in views]
         dataset.labels = data['Y'].flatten().astype(int)
+    else:
+        raise ValueError(f"Unexpected data format in {file_path}. Expected 'fea'/'gt' or 'X'/'Y' keys.")
     
     if dataset.labels.min() == 1:
         dataset.labels -= 1
