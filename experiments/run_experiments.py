@@ -46,10 +46,10 @@ def run_single_experiment(method, X_views, y_true, method_name):
         return None
 
 
-def run_experiments(dataset_name, n_runs=10, save_dir='./results', random_seed=42):
+def run_experiments(dataset_name, n_runs=10, save_dir='./results', random_seed=42, include_deep=False):
     """
     Run experiments on a single dataset.
-    
+
     Parameters
     ----------
     dataset_name : str
@@ -60,7 +60,9 @@ def run_experiments(dataset_name, n_runs=10, save_dir='./results', random_seed=4
         Directory to save results.
     random_seed : int
         Base random seed.
-        
+    include_deep : bool
+        Whether to include deep learning methods.
+
     Returns
     -------
     results_df : DataFrame
@@ -69,18 +71,18 @@ def run_experiments(dataset_name, n_runs=10, save_dir='./results', random_seed=4
     print(f"\n{'='*70}")
     print(f"Dataset: {dataset_name}")
     print(f"{'='*70}")
-    
+
     # Load dataset
     dataset = load_dataset(dataset_name)
     dataset.normalize('standard')
     print(dataset)
-    
+
     X_views = dataset.views
     y_true = dataset.labels
     n_clusters = dataset.n_clusters
-    
-    # Initialize methods
-    methods = get_baseline_methods(n_clusters, random_state=random_seed)
+
+    # Initialize methods (with optional deep methods)
+    methods = get_baseline_methods(n_clusters, random_state=random_seed, include_deep=include_deep)
     
     # Add SPOCK
     spock = SPOCK(
@@ -159,27 +161,28 @@ def run_experiments(dataset_name, n_runs=10, save_dir='./results', random_seed=4
     return results_df
 
 
-def run_all_experiments(n_runs=10, save_dir='./results', random_seed=42):
+def run_all_experiments(n_runs=10, save_dir='./results', random_seed=42, include_deep=False):
     """Run experiments on all available datasets."""
     datasets = get_available_datasets()
     all_results = {}
-    
+
     for dataset_name in datasets:
         try:
             results = run_experiments(
-                dataset_name, 
-                n_runs=n_runs, 
+                dataset_name,
+                n_runs=n_runs,
                 save_dir=save_dir,
-                random_seed=random_seed
+                random_seed=random_seed,
+                include_deep=include_deep
             )
             all_results[dataset_name] = results
         except Exception as e:
             print(f"Error processing {dataset_name}: {e}")
             continue
-    
+
     # Generate LaTeX table
     generate_latex_table(all_results, save_dir)
-    
+
     return all_results
 
 
@@ -244,21 +247,36 @@ def main():
                        help='Directory to save results')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed')
-    
+    parser.add_argument('--include_deep', '--include_scalable', action='store_true',
+                       dest='include_scalable',
+                       help='Include scalable SOTA baselines (LMVSC, SMVSC, BMVC, etc.)')
+
     args = parser.parse_args()
-    
+
+    # Print scalable methods availability if requested
+    if args.include_scalable:
+        from spock.baselines import check_scalable_methods_availability
+        print("\nScalable Methods (near-linear complexity):")
+        availability = check_scalable_methods_availability()
+        for method, available in availability.items():
+            status = "✓ Available" if available else "✗ Not available"
+            print(f"  {method}: {status}")
+        print()
+
     if args.dataset.lower() == 'all':
         run_all_experiments(
             n_runs=args.n_runs,
             save_dir=args.save_dir,
-            random_seed=args.seed
+            random_seed=args.seed,
+            include_deep=args.include_scalable
         )
     else:
         run_experiments(
             args.dataset,
             n_runs=args.n_runs,
             save_dir=args.save_dir,
-            random_seed=args.seed
+            random_seed=args.seed,
+            include_deep=args.include_scalable
         )
 
 

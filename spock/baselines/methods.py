@@ -502,10 +502,10 @@ def get_baseline_methods(n_clusters, random_state=None):
     return {
         'Concat+KMeans': ConcatKMeans(n_clusters, random_state),
         'Concat+Spectral': ConcatSpectral(n_clusters, random_state=random_state),
-        'Best-View': BestViewSpectral(n_clusters, random_state=random_state),
-        'Co-Reg': CoRegSpectral(n_clusters, random_state=random_state),
+        # 'Best-View': BestViewSpectral(n_clusters, random_state=random_state),
+        # 'Co-Reg': CoRegSpectral(n_clusters, random_state=random_state),
         'MV-KMeans': MultiViewKMeans(n_clusters, random_state=random_state),
-        'MVSC': MVSC(n_clusters, random_state=random_state),
+        # 'MVSC': MVSC(n_clusters, random_state=random_state),
         'LMvSC': LMvSC(n_clusters, random_state=random_state),
-        'MLAN': MLAN(n_clusters, random_state=random_state),
+        # 'MLAN': MLAN(n_clusters, random_state=random_state),
     }
