@@ -1104,9 +1104,437 @@ class SCMVCWrapper(BaseExternalMVC):
         return labels
 
 
+class EFIMVCWrapper(BaseExternalMVC):
+    """
+    Efficient Federated Incomplete Multi-View Clustering (EFIMVC).
+
+    Paper: "Efficient Federated Incomplete Multi-View Clustering"
+    Venue: ICML 2025
+    GitHub: https://github.com/Tracesource/EFIMVC
+
+    Note: Original implementation is in MATLAB. This wrapper provides a
+    Python approximation based on the paper's methodology.
+
+    Setup:
+        cd spock/baselines/external
+        git clone https://github.com/Tracesource/EFIMVC.git
+
+    The algorithm uses:
+    1. Client-side pre-training: Learn local anchor representations via constrained optimization
+    2. Server aggregation: Fuse client representations 
+    3. Iterative refinement with orthogonal projections
+    4. Final clustering via SVD on aggregated representation
+
+    Parameters
+    ----------
+    n_clusters : int
+        Number of clusters.
+    n_anchors : int, default=None
+        Number of anchors (lambda1 in paper). If None, uses 2*n_clusters.
+    lambda2 : float, default=0.1
+        Regularization for client optimization.
+    lambda3 : float, default=0.1
+        Regularization for server optimization.
+    max_iter : int, default=5
+        Maximum iterations for alternating optimization.
+    random_state : int, optional
+        Random seed.
+    """
+
+    def __init__(self, n_clusters, n_anchors=None, lambda2=0.1, lambda3=0.1,
+                 max_iter=5, device='auto', random_state=None):
+        super().__init__(n_clusters, device, random_state)
+        self.n_anchors = n_anchors if n_anchors is not None else 2 * n_clusters
+        self.lambda2 = lambda2
+        self.lambda3 = lambda3
+        self.max_iter = max_iter
+        self.name = 'EFIMVC'
+
+    def _get_external_paths(self):
+        return ['EFIMVC', 'efimvc']
+
+    def _run_external(self, X_views):
+        """
+        EFIMVC is implemented in MATLAB. Check if MATLAB engine is available,
+        otherwise fall back to Python implementation.
+        """
+        try:
+            import matlab.engine
+            return self._run_matlab(X_views)
+        except ImportError:
+            # MATLAB Engine not available, use Python approximation
+            return self._run_python(X_views)
+
+    def _run_matlab(self, X_views):
+        """Run original MATLAB implementation via MATLAB Engine."""
+        import matlab.engine
+        import matlab
+        
+        eng = matlab.engine.start_matlab()
+        
+        # Add EFIMVC path
+        external_path = self._find_external_path()
+        eng.addpath(eng.genpath(external_path))
+        
+        # Convert data to MATLAB format
+        n_views = len(X_views)
+        n_samples = X_views[0].shape[0]
+        
+        # Prepare data cell array
+        X_matlab = []
+        for v in range(n_views):
+            X_matlab.append(matlab.double(X_views[v].T.tolist()))  # MATLAB expects features x samples
+        
+        # Create indicator matrix (all samples complete for standard MVC)
+        ind = matlab.double([[1.0] * n_samples for _ in range(n_views)])
+        ind = eng.transpose(ind)
+        
+        # Run EFIMVC core algorithm
+        lambda1 = float(self.n_anchors)
+        lambda2 = float(self.lambda2)
+        lambda3 = float(self.lambda3)
+        
+        # Client pre-training
+        Z_list = []
+        for v in range(n_views):
+            Z = eng.client_pretrain(X_matlab[v], lambda1, lambda2, 
+                                    eng.transpose(matlab.double([ind[i][v] for i in range(n_samples)])))
+            Z_list.append(Z)
+        
+        # Server pre-training
+        Zall = eng.server_pretrain(Z_list, ind, lambda1)
+        
+        # Iterative refinement
+        P_list = [matlab.double(np.eye(int(lambda1)).tolist()) for _ in range(n_views)]
+        
+        for _ in range(self.max_iter):
+            # Client training
+            S_list = []
+            for v in range(n_views):
+                Z_new, S, _ = eng.client_train(X_matlab[v], Z_list[v], lambda1, lambda2,
+                                                eng.transpose(matlab.double([ind[i][v] for i in range(n_samples)])),
+                                                Zall, P_list[v], nargout=3)
+                Z_list[v] = Z_new
+                S_list.append(S)
+            
+            # Server training
+            Zall, P_list, _ = eng.server_train(P_list, Zall, Z_list, S_list, lambda3, ind, nargout=3)
+        
+        # Final clustering via SVD
+        Zall_np = np.array(eng.transpose(Zall))
+        U, _, _ = np.linalg.svd(Zall_np, full_matrices=False)
+        U = U[:, :self.n_clusters]
+        
+        # K-means on SVD embedding
+        from sklearn.cluster import KMeans
+        kmeans = KMeans(n_clusters=self.n_clusters, random_state=self.random_state, n_init=10)
+        labels = kmeans.fit_predict(U)
+        
+        eng.quit()
+        return labels
+
+    def _run_python(self, X_views):
+        """
+        Python approximation of EFIMVC algorithm.
+        
+        Core idea: Learn anchor-based representations per view, aggregate them,
+        and perform spectral clustering on the fused representation.
+        """
+        from sklearn.cluster import KMeans
+        from sklearn.preprocessing import normalize
+        
+        n_views = len(X_views)
+        n_samples = X_views[0].shape[0]
+        n_anchors = min(self.n_anchors, n_samples // 2)
+        
+        # Step 1: Client-side anchor learning (per view)
+        Z_views = []
+        A_views = []  # Anchor matrices
+        
+        for v in range(n_views):
+            X = X_views[v]
+            
+            # Select anchors via K-means
+            kmeans = KMeans(n_clusters=n_anchors, random_state=self.random_state, n_init=3, max_iter=50)
+            kmeans.fit(X)
+            A = kmeans.cluster_centers_  # (n_anchors, d)
+            A_views.append(A)
+            
+            # Compute soft assignment matrix Z: each sample's representation in anchor space
+            # Z_ij = similarity between sample i and anchor j, normalized
+            # Using RBF kernel similarity
+            from scipy.spatial.distance import cdist
+            D = cdist(X, A, 'euclidean')
+            sigma = np.median(D) + 1e-10
+            S = np.exp(-D**2 / (2 * sigma**2))
+            
+            # Row-normalize to get soft assignment (simplex constraint approximation)
+            Z = S / (S.sum(axis=1, keepdims=True) + 1e-10)
+            Z_views.append(Z)  # (n_samples, n_anchors)
+        
+        # Step 2: Server-side aggregation with orthogonal projection
+        # Initialize aggregated representation
+        Zall = np.mean(Z_views, axis=0)  # Simple average fusion
+        
+        # Iterative refinement with orthogonal projections
+        P_views = [np.eye(n_anchors) for _ in range(n_views)]
+        
+        for iteration in range(self.max_iter):
+            # Update per-view representations with projection
+            Z_projected = []
+            for v in range(n_views):
+                # Project view representation towards consensus
+                Z_proj = Z_views[v] @ P_views[v]
+                Z_projected.append(Z_proj)
+            
+            # Update consensus (server aggregation)
+            Zall_new = np.mean(Z_projected, axis=0)
+            
+            # Update orthogonal projections (Procrustes-like)
+            for v in range(n_views):
+                # Find orthogonal P that aligns Z_v with Zall
+                M = Z_views[v].T @ Zall_new
+                U, _, Vt = np.linalg.svd(M, full_matrices=False)
+                P_views[v] = U @ Vt
+            
+            # Check convergence
+            diff = np.linalg.norm(Zall_new - Zall) / (np.linalg.norm(Zall) + 1e-10)
+            Zall = Zall_new
+            if diff < 1e-4:
+                break
+        
+        # Step 3: Spectral clustering on aggregated representation
+        # SVD for dimensionality reduction
+        U, s, Vt = np.linalg.svd(Zall, full_matrices=False)
+        
+        # Use top-k singular vectors
+        k = min(self.n_clusters, U.shape[1])
+        embedding = U[:, :k] * s[:k]
+        
+        # Normalize embedding
+        embedding = normalize(embedding, axis=1)
+        
+        # Final K-means
+        kmeans = KMeans(n_clusters=self.n_clusters, random_state=self.random_state, n_init=10)
+        labels = kmeans.fit_predict(embedding)
+        
+        return labels
+
+    def _run_fallback(self, X_views):
+        """Fallback to Python implementation."""
+        return self._run_python(X_views)
+
+
+class ALPCWrapper(BaseExternalMVC):
+    """
+    Anchor Learning with Potential Cluster Constraints for Multi-view Clustering (ALPC).
+
+    Paper: "Anchor Learning with Potential Cluster Constraints for Multi-view Clustering"
+    Venue: AAAI 2025
+    GitHub: https://github.com/whbdmu/ALPC
+
+    Note: Original implementation is in MATLAB. This wrapper provides a
+    Python implementation based on the paper's methodology.
+
+    The algorithm:
+    1. Learns view-specific anchor matrices A_v
+    2. Imposes shared potential clustering semantic constraints
+    3. Aligns clustering centers of data with clustering centers of anchors
+    4. Uses orthogonal constraints for discriminative anchors
+
+    Parameters
+    ----------
+    n_clusters : int
+        Number of clusters.
+    n_anchors_per_cluster : int, default=2
+        Number of anchors per cluster (m in paper). Total anchors = m * k.
+    alpha : float, default=1.0
+        Weight for orthogonal constraint.
+    beta : float, default=1.0
+        Weight for cluster constraint.
+    max_iter : int, default=50
+        Maximum iterations.
+    random_state : int, optional
+        Random seed.
+    """
+
+    def __init__(self, n_clusters, n_anchors_per_cluster=2, alpha=1.0, beta=1.0,
+                 max_iter=50, device='auto', random_state=None):
+        super().__init__(n_clusters, device, random_state)
+        self.n_anchors_per_cluster = n_anchors_per_cluster
+        self.alpha = alpha
+        self.beta = beta
+        self.max_iter = max_iter
+        self.name = 'ALPC'
+
+    def _get_external_paths(self):
+        return ['ALPC', 'alpc', 'ALPC/ALPC']
+
+    def _run_external(self, X_views):
+        """Run Python implementation of ALPC algorithm."""
+        return self._run_python(X_views)
+
+    def _run_python(self, X_views):
+        """
+        Python implementation of ALPC algorithm.
+        
+        Based on the MATLAB code from the paper with improved initialization.
+        """
+        from sklearn.cluster import KMeans
+        from sklearn.preprocessing import normalize
+        from scipy.spatial.distance import cdist
+        
+        n_views = len(X_views)
+        n_samples = X_views[0].shape[0]
+        k = self.n_clusters
+        m = self.n_anchors_per_cluster
+        n_anchors = m * k  # Total number of anchors
+        
+        alpha = self.alpha
+        beta = self.beta
+        reg = 1e-4  # Regularization for numerical stability
+        
+        # Transpose X_views to match MATLAB convention (features x samples)
+        X_T = [X.T.astype(np.float64) for X in X_views]  # Each is (d_v, n_samples)
+        
+        # Better initialization: use K-means to initialize anchors
+        # Concatenate views for initial anchor selection
+        X_concat = np.hstack(X_views)  # (n_samples, sum_dims)
+        
+        # Run K-means to get initial anchor positions
+        kmeans_init = KMeans(n_clusters=n_anchors, random_state=self.random_state, n_init=3, max_iter=30)
+        kmeans_init.fit(X_concat)
+        
+        # Initialize Z based on soft assignment to K-means centers
+        centers = kmeans_init.cluster_centers_  # (n_anchors, sum_dims)
+        D = cdist(X_concat, centers, 'euclidean')
+        sigma = np.median(D) + 1e-10
+        S = np.exp(-D**2 / (2 * sigma**2))
+        Z = (S / (S.sum(axis=1, keepdims=True) + 1e-10)).T  # (n_anchors, n_samples)
+        
+        # Initialize anchor matrices A_v from projected K-means centers
+        A_views = []
+        dim_offset = 0
+        for v in range(n_views):
+            d_v = X_views[v].shape[1]
+            # Extract view-specific part of centers
+            A_v = centers[:, dim_offset:dim_offset + d_v].T  # (d_v, n_anchors)
+            A_views.append(A_v.astype(np.float64))
+            dim_offset += d_v
+        
+        # Initialize R (k x n_samples) - cluster indicator via K-means on Z
+        Z_for_cluster = Z.T  # (n_samples, n_anchors)
+        kmeans_r = KMeans(n_clusters=k, random_state=self.random_state, n_init=3)
+        labels_init = kmeans_r.fit_predict(Z_for_cluster)
+        R = np.zeros((k, n_samples))
+        for i, label in enumerate(labels_init):
+            R[label, i] = 1.0
+        
+        # Initialize Y (k x n_anchors) - anchor-to-cluster assignment
+        # Each cluster has m anchors
+        Y = np.zeros((k, n_anchors))
+        for ik in range(k):
+            Y[ik, ik*m:(ik+1)*m] = 1
+        
+        # Initialize P = Y
+        P = Y.copy().astype(np.float64)
+        
+        # Initialize U_v via SVD of A_v @ P^T
+        U_views = []
+        for v in range(n_views):
+            AP = A_views[v] @ P.T
+            if np.linalg.norm(AP) > 1e-10:
+                Up, _, Vt = np.linalg.svd(AP, full_matrices=False)
+                U_views.append(Up @ Vt)
+            else:
+                U_views.append(np.eye(min(A_views[v].shape[0], k)))
+        
+        obj_prev = np.inf
+        for iteration in range(self.max_iter):
+            # Update Z (n_anchors x n_samples)
+            tZ1 = reg * np.eye(n_anchors)
+            tZ2 = np.zeros((n_anchors, n_samples))
+            for v in range(n_views):
+                tZ1 += A_views[v].T @ A_views[v]
+                tZ2 += A_views[v].T @ X_T[v]
+            
+            try:
+                Z = np.linalg.solve(tZ1 + beta * np.eye(n_anchors), tZ2 + beta * P.T @ R)
+            except np.linalg.LinAlgError:
+                Z = np.linalg.lstsq(tZ1 + beta * np.eye(n_anchors), tZ2 + beta * P.T @ R, rcond=None)[0]
+            
+            # Update A_v for each view
+            ZZT = Z @ Z.T + (alpha + reg) * np.eye(n_anchors)
+            ZZT_inv = np.linalg.inv(ZZT)
+            for v in range(n_views):
+                A_views[v] = (X_T[v] @ Z.T + alpha * U_views[v] @ P) @ ZZT_inv
+            
+            # Update U_v for each view (SVD)
+            for v in range(n_views):
+                AP = A_views[v] @ P.T
+                if np.linalg.norm(AP) > 1e-10:
+                    Up, _, Vt = np.linalg.svd(AP, full_matrices=False)
+                    U_views[v] = Up @ Vt
+            
+            # Update P
+            UA = np.zeros((k, n_anchors))
+            for v in range(n_views):
+                if U_views[v].shape[0] >= k:
+                    UA += U_views[v][:k, :k].T @ A_views[v][:k, :] if A_views[v].shape[0] >= k else U_views[v].T @ A_views[v]
+                else:
+                    UA += U_views[v].T @ A_views[v]
+            
+            RRT = R @ R.T + reg * np.eye(k)
+            try:
+                P = np.linalg.solve(alpha * np.eye(k) + beta * RRT, UA + beta * R @ Z.T)
+            except np.linalg.LinAlgError:
+                P = np.linalg.lstsq(alpha * np.eye(k) + beta * RRT, UA + beta * R @ Z.T, rcond=None)[0]
+            
+            # Update R
+            PPT = P @ P.T + reg * np.eye(k)
+            try:
+                PPT_inv = np.linalg.inv(PPT)
+                R = PPT_inv @ P @ Z
+            except np.linalg.LinAlgError:
+                R = np.linalg.lstsq(PPT, P @ Z, rcond=None)[0]
+            
+            # Compute objective (for convergence check)
+            obj = 0
+            for v in range(n_views):
+                obj += np.linalg.norm(X_T[v] - A_views[v] @ Z, 'fro') ** 2
+                obj += alpha * np.linalg.norm(A_views[v] - U_views[v] @ P, 'fro') ** 2
+            obj += beta * np.linalg.norm(Z - P.T @ R, 'fro') ** 2
+            
+            # Check convergence
+            if iteration > 0 and abs(obj_prev - obj) / (abs(obj_prev) + 1e-10) < 1e-6:
+                break
+            obj_prev = obj
+        
+        # Get cluster assignments from R (cluster indicator matrix)
+        # R is (k x n_samples), each column indicates cluster membership
+        labels = np.argmax(R, axis=0)
+        
+        # If R doesn't give good assignments, use K-means on Z
+        if len(np.unique(labels)) < k:
+            # Z is (n_anchors x n_samples), use Z^T for clustering
+            Z_embedding = Z.T  # (n_samples x n_anchors)
+            Z_embedding = normalize(Z_embedding, axis=1)
+            
+            kmeans = KMeans(n_clusters=k, random_state=self.random_state, n_init=10)
+            labels = kmeans.fit_predict(Z_embedding)
+        
+        return labels
+
+    def _run_fallback(self, X_views):
+        """Fallback to Python implementation."""
+        return self._run_python(X_views)
+
+
 # Registry of external methods
 EXTERNAL_METHODS = {
     'SCMVC': SCMVCWrapper,
+    'EFIMVC': EFIMVCWrapper,
+    'ALPC': ALPCWrapper,
 }
 
 
@@ -1192,6 +1620,22 @@ def list_external_methods():
             'github': 'https://github.com/SongwuJob/SCMVC',
             'setup': f'cd {EXTERNAL_DIR} && git clone https://github.com/SongwuJob/SCMVC.git',
             'requirements': ['torch>=1.12.0', 'scikit-learn'],
+        },
+        'EFIMVC': {
+            'name': 'Efficient Federated Incomplete Multi-View Clustering',
+            'paper': 'ICML 2025',
+            'github': 'https://github.com/Tracesource/EFIMVC',
+            'setup': f'cd {EXTERNAL_DIR} && git clone https://github.com/Tracesource/EFIMVC.git',
+            'requirements': ['scikit-learn', 'scipy'],
+            'note': 'Original MATLAB implementation. Python approximation used as fallback.',
+        },
+        'ALPC': {
+            'name': 'Anchor Learning with Potential Cluster Constraints for MVC',
+            'paper': 'AAAI 2025',
+            'github': 'https://github.com/whbdmu/ALPC',
+            'setup': f'cd {EXTERNAL_DIR} && git clone https://github.com/whbdmu/ALPC.git',
+            'requirements': ['scikit-learn', 'scipy'],
+            'note': 'Original MATLAB implementation. Python implementation provided.',
         },
     }
 

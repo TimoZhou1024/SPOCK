@@ -60,6 +60,8 @@ from .scalable_methods import (
     BMVCWrapper,
     FastMVCWrapper,
     SCMVCWrapper,
+    EFIMVCWrapper,
+    ALPCWrapper,
     get_scalable_methods,
     check_scalable_methods_availability,
     list_external_methods,
@@ -139,6 +141,8 @@ __all__ = [
     'SCALABLE_METHODS',
     # External methods
     'SCMVCWrapper',
+    'EFIMVCWrapper',
+    'ALPCWrapper',
     'EXTERNAL_METHODS',
     'list_external_methods',
     # Factory functions

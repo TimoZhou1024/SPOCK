@@ -211,26 +211,55 @@ def load_scene15(data_path='./data'):
     """
     Load Scene-15 dataset.
     
-    Supports two formats:
-    1. Pre-extracted features: Scene15.mat (3 views: PHOG, Gist, LBP)
-    2. Raw images: 15-Scene/ folder with subfolders 00-14
+    Supports multiple formats:
+    1. scene15.mat with 'X' cell array and 'gt' labels
+    2. Scene15.mat with 'X' array and 'Y' labels  
+    3. Raw images: 15-Scene/ folder with subfolders 00-14
        - Extracts features using: Histogram, Edge, Color statistics
     
     4485 samples, 15 scene categories.
     """
     dataset = MultiViewDataset('Scene15')
     
-    mat_file_path = os.path.join(data_path, 'Scene15.mat')
+    # Try multiple mat file names
+    mat_files = ['scene15.mat', 'Scene15.mat']
+    mat_file_path = None
+    for fname in mat_files:
+        path = os.path.join(data_path, fname)
+        if os.path.exists(path):
+            mat_file_path = path
+            break
+    
     image_dir = os.path.join(data_path, '15-Scene')
     
     # Try loading from .mat file first
-    if os.path.exists(mat_file_path):
+    if mat_file_path is not None:
         data = loadmat(mat_file_path)
         
         if 'X' in data:
-            views = data['X'].flatten()
-            dataset.views = [np.array(v) for v in views]
-            dataset.labels = data['Y'].flatten().astype(int)
+            X = data['X']
+            # Handle cell array format: X is (1, n_views), each cell is (features, samples)
+            if X.shape[0] == 1 and X.dtype == object:
+                views = []
+                for i in range(X.shape[1]):
+                    v = X[0, i]
+                    # Transpose if features > samples (features, samples) -> (samples, features)
+                    if v.shape[0] < v.shape[1]:
+                        v = v.T
+                    views.append(np.array(v, dtype=np.float64))
+                dataset.views = views
+            else:
+                # Flat array format
+                views = X.flatten()
+                dataset.views = [np.array(v, dtype=np.float64) for v in views]
+            
+            # Try different label keys
+            if 'gt' in data:
+                dataset.labels = data['gt'].flatten().astype(int)
+            elif 'Y' in data:
+                dataset.labels = data['Y'].flatten().astype(int)
+            else:
+                raise ValueError("No label field found (tried 'gt', 'Y')")
         else:
             for key in sorted(data.keys()):
                 if not key.startswith('_'):
