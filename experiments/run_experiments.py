@@ -5,6 +5,7 @@ Compares SPOCK with baseline methods on multiple datasets.
 Usage:
     python run_experiments.py --dataset all --n_runs 10
     python run_experiments.py --dataset Handwritten --n_runs 5
+    python run_experiments.py --dataset Handwritten --use_tuned  # Use Optuna-tuned params
 """
 
 import os
@@ -24,6 +25,62 @@ from spock import SPOCK
 from spock.datasets import load_dataset, get_available_datasets
 from spock.baselines import get_baseline_methods
 from spock.evaluation import evaluate_clustering, MetricTracker
+
+
+# Path to tuned parameters config
+TUNED_PARAMS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    'config', 'tuned_params.json'
+)
+
+
+def load_tuned_params(dataset_name: str) -> dict:
+    """
+    Load Optuna-tuned parameters for a dataset.
+    
+    Parameters
+    ----------
+    dataset_name : str
+        Name of the dataset.
+        
+    Returns
+    -------
+    params : dict or None
+        Tuned parameters if available, else None.
+    """
+    if not os.path.exists(TUNED_PARAMS_PATH):
+        return None
+    
+    try:
+        with open(TUNED_PARAMS_PATH, 'r') as f:
+            all_params = json.load(f)
+        
+        key = dataset_name.lower()
+        if key in all_params:
+            return all_params[key]['params']
+        return None
+    except Exception as e:
+        print(f"Warning: Could not load tuned params: {e}")
+        return None
+
+
+def get_default_spock_params(dataset, X_views) -> dict:
+    """
+    Get default SPOCK parameters based on dataset characteristics.
+    """
+    n_samples = dataset.n_samples
+    min_dim = min(v.shape[1] for v in X_views)
+    
+    return {
+        'alpha': 1.0,
+        'beta': 0.1,
+        'lambda_l21': 0.01,
+        'k_neighbors': 10,
+        'proj_dim': min(100, min_dim),
+        'rff_dim': 256,
+        'n_landmarks': min(500, n_samples // 2),
+        'use_spectral': True,
+    }
 
 
 def run_single_experiment(method, X_views, y_true, method_name):
@@ -46,7 +103,8 @@ def run_single_experiment(method, X_views, y_true, method_name):
         return None
 
 
-def run_experiments(dataset_name, n_runs=10, save_dir='./results', random_seed=42, include_deep=False):
+def run_experiments(dataset_name, n_runs=10, save_dir='./results', random_seed=42,
+                    include_deep=False, include_external=False, use_tuned=False):
     """
     Run experiments on a single dataset.
 
@@ -61,7 +119,11 @@ def run_experiments(dataset_name, n_runs=10, save_dir='./results', random_seed=4
     random_seed : int
         Base random seed.
     include_deep : bool
-        Whether to include deep learning methods.
+        Whether to include scalable methods.
+    include_external : bool
+        Whether to include external methods (SCMVC, etc.).
+    use_tuned : bool
+        Whether to use Optuna-tuned parameters if available.
 
     Returns
     -------
@@ -81,22 +143,28 @@ def run_experiments(dataset_name, n_runs=10, save_dir='./results', random_seed=4
     y_true = dataset.labels
     n_clusters = dataset.n_clusters
 
-    # Initialize methods (with optional deep methods)
-    methods = get_baseline_methods(n_clusters, random_state=random_seed, include_deep=include_deep)
+    # Initialize methods (with optional scalable and external methods)
+    methods = get_baseline_methods(n_clusters, random_state=random_seed,
+                                   include_deep=include_deep, include_external=include_external)
+    
+    # Get SPOCK parameters (tuned or default)
+    if use_tuned:
+        tuned_params = load_tuned_params(dataset_name)
+        if tuned_params:
+            print(f"Using Optuna-tuned parameters for {dataset_name}")
+            spock_params = tuned_params
+        else:
+            print(f"No tuned params found for {dataset_name}, using defaults")
+            spock_params = get_default_spock_params(dataset, X_views)
+    else:
+        spock_params = get_default_spock_params(dataset, X_views)
     
     # Add SPOCK
     spock = SPOCK(
         n_clusters=n_clusters,
-        alpha=1.0,
-        beta=0.1,
-        lambda_l21=0.01,
-        k_neighbors=10,
-        proj_dim=min(100, min(v.shape[1] for v in X_views)),
-        rff_dim=256,
-        n_landmarks=min(500, dataset.n_samples // 2),
         random_state=random_seed,
         verbose=False,
-        use_spectral=True
+        **spock_params
     )
     methods['SPOCK'] = spock
     
@@ -161,7 +229,8 @@ def run_experiments(dataset_name, n_runs=10, save_dir='./results', random_seed=4
     return results_df
 
 
-def run_all_experiments(n_runs=10, save_dir='./results', random_seed=42, include_deep=False):
+def run_all_experiments(n_runs=10, save_dir='./results', random_seed=42,
+                        include_deep=False, include_external=False, use_tuned=False):
     """Run experiments on all available datasets."""
     datasets = get_available_datasets()
     all_results = {}
@@ -173,7 +242,9 @@ def run_all_experiments(n_runs=10, save_dir='./results', random_seed=42, include
                 n_runs=n_runs,
                 save_dir=save_dir,
                 random_seed=random_seed,
-                include_deep=include_deep
+                include_deep=include_deep,
+                include_external=include_external,
+                use_tuned=use_tuned
             )
             all_results[dataset_name] = results
         except Exception as e:
@@ -250,11 +321,16 @@ def main():
     parser.add_argument('--include_deep', '--include_scalable', action='store_true',
                        dest='include_scalable',
                        help='Include scalable SOTA baselines (LMVSC, SMVSC, BMVC, etc.)')
+    parser.add_argument('--include_external', action='store_true',
+                       help='Include external methods (SCMVC, etc.) that require git clone')
+    parser.add_argument('--use-tuned', '--use_tuned', action='store_true',
+                       dest='use_tuned',
+                       help='Use Optuna-tuned parameters from config/tuned_params.json')
 
     args = parser.parse_args()
 
     # Print scalable methods availability if requested
-    if args.include_scalable:
+    if args.include_scalable or args.include_external:
         from spock.baselines import check_scalable_methods_availability
         print("\nScalable Methods (near-linear complexity):")
         availability = check_scalable_methods_availability()
@@ -268,7 +344,9 @@ def main():
             n_runs=args.n_runs,
             save_dir=args.save_dir,
             random_seed=args.seed,
-            include_deep=args.include_scalable
+            include_deep=args.include_scalable,
+            include_external=args.include_external,
+            use_tuned=args.use_tuned
         )
     else:
         run_experiments(
@@ -276,7 +354,9 @@ def main():
             n_runs=args.n_runs,
             save_dir=args.save_dir,
             random_seed=args.seed,
-            include_deep=args.include_scalable
+            include_deep=args.include_scalable,
+            include_external=args.include_external,
+            use_tuned=args.use_tuned
         )
 
 

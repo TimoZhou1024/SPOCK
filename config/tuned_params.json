@@ -1,0 +1,42 @@
+{
+  "handwritten": {
+    "params": {
+      "alpha": 1.335381908879058,
+      "beta": 0.033852267834519785,
+      "lambda_l21": 0.010968217207529524,
+      "proj_dim": 4,
+      "k_neighbors": 9,
+      "n_landmarks": 973,
+      "mu": 0.7588628998569473,
+      "gamma": 0.24420460844911424,
+      "tau": 0.815861880342119,
+      "sinkhorn_reg": 0.15696396388661144,
+      "use_spectral": true,
+      "rff_dim": 512
+    },
+    "best_value": 0.9465,
+    "metric": "ACC",
+    "n_trials": 5,
+    "timestamp": "2025-12-11T12:28:01"
+  },
+  "nuswide": {
+    "params": {
+      "alpha": 1.0769622478263126,
+      "beta": 0.019485671251272575,
+      "lambda_l21": 0.0013492834268013251,
+      "proj_dim": 62,
+      "k_neighbors": 30,
+      "n_landmarks": 828,
+      "mu": 0.3589217037973651,
+      "gamma": 0.013940346079873234,
+      "tau": 0.6473864212097256,
+      "sinkhorn_reg": 0.07591104805282695,
+      "use_spectral": false,
+      "rff_dim": 256
+    },
+    "best_value": 0.172,
+    "metric": "ACC",
+    "n_trials": 5,
+    "timestamp": "2025-12-11T12:33:53"
+  }
+}

@@ -61,3 +61,7 @@ main.log
 
 # claude
 .claude/
+
+# Optuna
+optuna_results/
+*.db

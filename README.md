@@ -135,6 +135,22 @@ uv run python experiments/run_experiments.py --dataset all --n_runs 10
 
 # Run on specific dataset
 uv run python experiments/run_experiments.py --dataset Handwritten --n_runs 10
+
+# Use Optuna-tuned parameters (from config/tuned_params.json)
+uv run python experiments/run_experiments.py --dataset Handwritten --use-tuned --n_runs 10
+```
+
+### Hyperparameter Tuning (Optuna)
+
+```bash
+# Install tuning dependencies
+uv sync --all-extras
+
+# Tune single dataset
+uv run python experiments/run_optuna_tuning.py --dataset Handwritten --n_trials 100
+
+# Tune all datasets (saves to config/tuned_params.json)
+uv run python experiments/tune_all_datasets.py --n_trials 100
 ```
 
 ### Scalability Analysis

@@ -45,11 +45,16 @@ faiss = [
 ot = [
     "pot>=0.8.0",
 ]
+# Hyperparameter tuning
+tuning = [
+    "optuna>=3.0.0",
+]
 # Full installation with all optional dependencies
 full = [
     "torch>=1.10.0",
     "faiss-cpu>=1.7.0",
     "pot>=0.8.0",
+    "optuna>=3.0.0",
 ]
 # Development dependencies
 dev = [
@@ -59,6 +64,7 @@ dev = [
     "isort>=5.10.0",
     "flake8>=4.0.0",
     "mypy>=0.950",
+    "optuna>=3.0.0",
 ]
 
 [project.scripts]
@@ -67,6 +73,7 @@ spock-experiment = "experiments.run_experiments:main"
 spock-ablation = "experiments.run_ablation:main"
 spock-sensitivity = "experiments.run_sensitivity:main"
 spock-scalability = "experiments.run_scalability:main"
+spock-tune = "experiments.run_optuna_tuning:main"
 
 [project.urls]
 Homepage = "https://github.com/spock-authors/spock"

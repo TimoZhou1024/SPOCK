@@ -918,7 +918,7 @@ class SCMVCWrapper(BaseExternalMVC):
         self.name = 'SCMVC'
 
     def _get_external_paths(self):
-        return ['SCMVC', 'scmvc']
+        return ['SCMVC', 'scmvc', 'spock/baselines/external']  # Include nested path from wrong clone
 
     def _run_external(self, X_views):
         """Run the external SCMVC implementation."""
