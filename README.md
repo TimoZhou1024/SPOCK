@@ -130,14 +130,26 @@ $$W'_{ij} = W_{ij} \cdot \rho_{ij} + \gamma \cdot [\mathbf{t}_i^\top \mathbf{t}_
 ### Main Experiments
 
 ```bash
-# Run on all datasets
-uv run python experiments/run_experiments.py --dataset all --n_runs 10
-
-# Run on specific dataset
+# SPOCK + traditional baselines (default)
 uv run python experiments/run_experiments.py --dataset Handwritten --n_runs 10
 
-# Use Optuna-tuned parameters (from config/tuned_params.json)
-uv run python experiments/run_experiments.py --dataset Handwritten --use-tuned --n_runs 10
+# SPOCK only (no baselines)
+uv run python experiments/run_experiments.py --dataset Handwritten --spock_only
+
+# SPOCK + scalable SOTA methods (LMVSC, SMVSC, BMVC, etc.)
+uv run python experiments/run_experiments.py --dataset Handwritten --include_scalable
+
+# SPOCK + external methods (SCMVC, requires git clone)
+uv run python experiments/run_experiments.py --dataset Handwritten --include_external
+
+# All methods (traditional + scalable + external)
+uv run python experiments/run_experiments.py --dataset Handwritten --include_all
+
+# Scalable methods only (no traditional baselines)
+uv run python experiments/run_experiments.py --dataset Handwritten --include_scalable --no_traditional
+
+# Use Optuna-tuned parameters
+uv run python experiments/run_experiments.py --dataset Handwritten --use_tuned
 ```
 
 ### Hyperparameter Tuning (Optuna)
@@ -237,6 +249,8 @@ SPOCK/
 
 SPOCK is compared against several multi-view clustering baselines:
 
+### Traditional Methods
+
 | Method | Description |
 |--------|-------------|
 | **Concat+KMeans** | Concatenate views + K-Means |
@@ -247,6 +261,19 @@ SPOCK is compared against several multi-view clustering baselines:
 | **MVSC** | Multi-View Spectral Clustering |
 | **LMvSC** | Large-scale Multi-View Subspace Clustering |
 | **MLAN** | Multi-View Learning with Adaptive Neighbors |
+
+### Scalable SOTA Methods (Near-Linear Complexity)
+
+| Method | Venue | Complexity | Description |
+|--------|-------|------------|-------------|
+| **LMVSC** | AAAI 2020 | O(nm²) | Large-scale Multi-View Spectral Clustering via Bipartite Graph |
+| **SMVSC** | ACM MM 2021 | O(nm²) | Scalable Multi-View Subspace Clustering with Unified Anchors |
+| **FMCNOF** | IEEE TIP 2021 | O(nmk) | Fast Multi-view Clustering via NMF |
+| **EOMSC-CA** | AAAI 2022 | O(nm²) | Efficient One-pass Multi-view Subspace Clustering |
+| **BMVC** | IEEE TPAMI 2019 | O(nmb) | Binary Multi-View Clustering |
+| **FastMVC** | - | O(nk) | Fast Multi-View Clustering (late fusion) |
+
+*n=samples, m=anchors, k=clusters, b=binary code length*
 
 ## Evaluation Metrics
 
