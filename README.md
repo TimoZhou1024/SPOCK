@@ -192,10 +192,11 @@ uv run python experiments/run_sensitivity.py --dataset Handwritten --param gamma
 |---------|---------|---------|-------|------------|--------|
 | **Handwritten** | 2000 | 10 | 6 | [216, 76, 64, 6, 240, 47] | ✅ Auto |
 | **BBCSport** | 544 | 5 | 2 | [3183, 3203] | ✅ Ready |
-| **COIL-20** | 1440 | 20 | multi | varies | Manual |
-| **Caltech101-7** | 1474 | 7 | 6 | varies | Manual |
-| **Caltech101-20** | 2386 | 20 | 6 | varies | Manual |
-| **Scene15** | 4485 | 15 | 3 | varies | Manual |
+| **NUS-WIDE** | 2000 | 31 | 5 | [65, 226, 145, 74, 129] | ✅ Ready |
+| **COIL-20** | 1440 | 20 | 3 | varies | ✅ Ready |
+| **Caltech101-7** | 1474 | 7 | 6 | [48, 40, 254, 1984, 512, 928] | ✅ Ready |
+| **Caltech101-20** | 2386 | 20 | 6 | varies | ✅ Ready |
+| **Scene15** | 4485 | 15 | 3 | [20, 59, 40] | ✅ Ready |
 
 ### Loading Datasets
 
@@ -205,6 +206,8 @@ from spock.datasets import (
     load_bbcsport,
     load_caltech101,
     load_scene15,
+    load_nuswide,
+    load_dataset,  # Generic loader
 )
 
 # Auto-download
@@ -213,8 +216,17 @@ dataset = load_handwritten()
 # BBCSport (from MatrixMarket files in data/bbcsport/)
 dataset = load_bbcsport()
 
-# Manual download required
+# NUS-WIDE
+dataset = load_nuswide()
+
+# Caltech101 (7 or 20 classes)
 dataset = load_caltech101(n_classes=7)
+
+# Scene15
+dataset = load_scene15()
+
+# Generic loader (auto-detect)
+dataset = load_dataset('Handwritten')
 ```
 
 ## Project Structure
@@ -225,24 +237,37 @@ SPOCK/
 │   ├── core/
 │   │   └── spock_algorithm.py    # Core SPOCK implementation
 │   ├── datasets/
-│   │   ├── loaders.py            # Dataset loaders (including BBCSport MTX)
+│   │   ├── loaders.py            # Dataset loaders
 │   │   └── download.py           # Auto-download utilities
 │   ├── evaluation/
 │   │   └── metrics.py            # ACC, NMI, ARI, Purity, F1
 │   └── baselines/
-│       └── methods.py            # Baseline methods for comparison
+│       ├── methods.py            # Traditional baseline methods
+│       ├── scalable_methods.py   # Scalable SOTA methods
+│       └── external/             # External methods (git clone)
+│           ├── SCMVC/
+│           ├── EFIMVC/
+│           └── ALPC/
 ├── experiments/
-│   ├── run_experiments.py        # SOTA comparison
+│   ├── run_experiments.py        # Main experiment runner
+│   ├── run_optuna_tuning.py      # Optuna hyperparameter tuning
+│   ├── tune_all_datasets.py      # Batch tuning all datasets
 │   ├── run_ablation.py           # Ablation study
 │   ├── run_sensitivity.py        # Parameter sensitivity
 │   └── run_scalability.py        # Scalability tests
+├── config/
+│   └── tuned_params.json         # Optuna-tuned parameters
 ├── data/
 │   ├── handwritten.mat           # Handwritten digits
-│   └── bbcsport/                 # BBCSport (MatrixMarket format)
+│   ├── bbcsport/                 # BBCSport
+│   ├── NUSWIDE.mat               # NUS-WIDE
+│   ├── Caltech101_7.mat          # Caltech101-7
+│   ├── Caltech101-20.mat         # Caltech101-20
+│   └── scene15.mat               # Scene15
 ├── results/                      # Experiment results
 ├── demo.py                       # Quick demo
-├── main.tex                      # Paper (ICML 2026)
-└── pyproject.toml               # Project configuration
+├── main.tex                      # Paper
+└── pyproject.toml                # Project configuration
 ```
 
 ## Baseline Methods
@@ -274,6 +299,22 @@ SPOCK is compared against several multi-view clustering baselines:
 | **FastMVC** | - | O(nk) | Fast Multi-View Clustering (late fusion) |
 
 *n=samples, m=anchors, k=clusters, b=binary code length*
+
+### External Methods (Require Git Clone)
+
+| Method | Venue | Description | Setup |
+|--------|-------|-------------|-------|
+| **SCMVC** | IEEE TMM 2024 | Self-Weighted Contrastive Fusion for Deep MVC | `git clone https://github.com/SongwuJob/SCMVC.git` |
+| **EFIMVC** | ICML 2025 | Efficient Federated Incomplete Multi-View Clustering | `git clone https://github.com/Tracesource/EFIMVC.git` |
+| **ALPC** | AAAI 2025 | Anchor Learning with Potential Cluster Constraints | `git clone https://github.com/whbdmu/ALPC.git` |
+
+To use external methods:
+```bash
+cd spock/baselines/external
+git clone https://github.com/SongwuJob/SCMVC.git
+git clone https://github.com/Tracesource/EFIMVC.git
+git clone https://github.com/whbdmu/ALPC.git
+```
 
 ## Evaluation Metrics
 
