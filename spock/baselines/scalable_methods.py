@@ -893,13 +893,19 @@ class SCMVCWrapper(BaseExternalMVC):
     ----------
     n_clusters : int
         Number of clusters.
-    epochs : int, default=200
-        Number of training epochs.
+    pre_epochs : int, default=200
+        Number of pretraining epochs.
+    con_epochs : int, default=50
+        Number of contrastive training epochs.
     batch_size : int, default=256
         Batch size for training.
-    learning_rate : float, default=1e-3
+    learning_rate : float, default=0.0003
         Learning rate.
-    temperature : float, default=0.5
+    feature_dim : int, default=64
+        Latent feature dimension.
+    high_feature_dim : int, default=20
+        High-level feature dimension.
+    temperature : float, default=1.0
         Temperature for contrastive loss.
     device : str, default='auto'
         Device to use ('cuda', 'cpu', or 'auto').
@@ -907,18 +913,21 @@ class SCMVCWrapper(BaseExternalMVC):
         Random seed.
     """
 
-    def __init__(self, n_clusters, epochs=200, batch_size=256,
-                 learning_rate=1e-3, temperature=0.5,
-                 device='auto', random_state=None):
+    def __init__(self, n_clusters, pre_epochs=200, con_epochs=50, batch_size=256,
+                 learning_rate=0.0003, feature_dim=64, high_feature_dim=20,
+                 temperature=1.0, device='auto', random_state=None):
         super().__init__(n_clusters, device, random_state)
-        self.epochs = epochs
+        self.pre_epochs = pre_epochs
+        self.con_epochs = con_epochs
         self.batch_size = batch_size
         self.learning_rate = learning_rate
+        self.feature_dim = feature_dim
+        self.high_feature_dim = high_feature_dim
         self.temperature = temperature
         self.name = 'SCMVC'
 
     def _get_external_paths(self):
-        return ['SCMVC', 'scmvc', 'spock/baselines/external']  # Include nested path from wrong clone
+        return ['SCMVC', 'scmvc']
 
     def _run_external(self, X_views):
         """Run the external SCMVC implementation."""
@@ -926,31 +935,39 @@ class SCMVCWrapper(BaseExternalMVC):
         import torch.nn as nn
         from torch.utils.data import Dataset, DataLoader
         from sklearn.preprocessing import MinMaxScaler
+        from sklearn.cluster import KMeans
+        import sys
+        import os
 
-        # Try to import from external SCMVC
-        try:
-            from network import Network
-            # ContrastiveLoss may not be needed if we use our own loss
-        except ImportError:
-            # If imports fail, use our simplified implementation
-            return self._run_simplified(X_views)
+        # Add external SCMVC path
+        external_path = self._find_external_path()
+        if external_path is None:
+            raise ImportError("SCMVC external code not found. Please clone the repository.")
+        
+        if external_path not in sys.path:
+            sys.path.insert(0, external_path)
+
+        # Import from external SCMVC
+        from network import Network
+        from loss import ContrastiveLoss
 
         device = torch.device(self.device)
         n_views = len(X_views)
         n_samples = X_views[0].shape[0]
         dims = [x.shape[1] for x in X_views]
 
-        # Create dataset
+        # Create dataset (matching SCMVC's expected format)
         class MVDataset(Dataset):
-            def __init__(self, views):
+            def __init__(self, views, labels=None):
                 self.views = [torch.FloatTensor(v) for v in views]
                 self.n_samples = views[0].shape[0]
+                self.labels = labels if labels is not None else np.zeros(self.n_samples)
 
             def __len__(self):
                 return self.n_samples
 
             def __getitem__(self, idx):
-                return [v[idx] for v in self.views], idx
+                return [v[idx] for v in self.views], self.labels[idx], idx
 
         # Normalize data
         X_normalized = []
@@ -961,146 +978,93 @@ class SCMVCWrapper(BaseExternalMVC):
         dataset = MVDataset(X_normalized)
         data_loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=True)
 
-        # Initialize model - Network expects (view, input_size, feature_dim, high_feature_dim, device)
-        model = Network(n_views, dims, 256, 128, device)
+        # Initialize model
+        model = Network(n_views, dims, self.feature_dim, self.high_feature_dim, device)
+        model = model.to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
+        contrastiveloss = ContrastiveLoss(self.batch_size, self.temperature, device).to(device)
+        mse = nn.MSELoss()
 
-        # Training
+        # Helper function for computing view weights
+        def compute_view_value(rs, H, view):
+            N = H.shape[0]
+            w = []
+            global_sim = torch.matmul(H, H.t())
+            for v in range(view):
+                view_sim = torch.matmul(rs[v], rs[v].t())
+                related_sim = torch.matmul(rs[v], H.t())
+                w_v = (torch.sum(view_sim) + torch.sum(global_sim) - 2 * torch.sum(related_sim)) / (N * N)
+                w.append(torch.exp(-w_v))
+            w = torch.stack(w)
+            w = w / torch.sum(w)
+            return w.squeeze()
+
+        # Pretraining phase
         model.train()
-        for epoch in range(self.epochs):
-            for xs, _ in data_loader:
-                xs = [x.to(device) for x in xs]
-                optimizer.zero_grad()
-
-                # Forward pass
-                hs, qs, xrs, zs = model(xs)
-
-                # Reconstruction loss
-                loss_rec = sum([nn.MSELoss()(xs[v], xrs[v]) for v in range(n_views)])
-
-                # Contrastive loss (simplified)
-                loss_con = 0
+        for epoch in range(self.pre_epochs):
+            for batch_idx, (xs, _, _) in enumerate(data_loader):
                 for v in range(n_views):
-                    for w in range(v + 1, n_views):
-                        sim = torch.mm(hs[v], hs[w].t()) / self.temperature
-                        labels = torch.arange(hs[v].size(0)).to(device)
-                        loss_con += nn.CrossEntropyLoss()(sim, labels)
-
-                loss = loss_rec + 0.1 * loss_con
+                    xs[v] = xs[v].to(device)
+                optimizer.zero_grad()
+                xrs, zs, rs, H = model(xs)
+                loss = sum([mse(xs[v], xrs[v]) for v in range(n_views)])
                 loss.backward()
                 optimizer.step()
 
-        # Get predictions
+        # Contrastive training phase
+        for epoch in range(self.con_epochs):
+            for batch_idx, (xs, _, _) in enumerate(data_loader):
+                for v in range(n_views):
+                    xs[v] = xs[v].to(device)
+                optimizer.zero_grad()
+                xrs, zs, rs, H = model(xs)
+
+                # Compute adaptive weights
+                with torch.no_grad():
+                    w = compute_view_value(rs, H, n_views)
+
+                loss_list = []
+                for v in range(n_views):
+                    loss_list.append(contrastiveloss(H, rs[v], w[v]))
+                    loss_list.append(mse(xs[v], xrs[v]))
+                loss = sum(loss_list)
+                loss.backward()
+                optimizer.step()
+
+        # Get predictions using K-means on H
         model.eval()
         full_loader = DataLoader(dataset, batch_size=n_samples, shuffle=False)
 
         with torch.no_grad():
-            for xs, _ in full_loader:
-                xs = [x.to(device) for x in xs]
-                hs, qs, xrs, zs = model(xs)
-                # Average soft labels
-                q_avg = sum(qs) / n_views
-                labels = torch.argmax(q_avg, dim=1).cpu().numpy()
+            for xs, _, _ in full_loader:
+                for v in range(n_views):
+                    xs[v] = xs[v].to(device)
+                xrs, zs, rs, H = model(xs)
+
+        # K-means clustering on global features H
+        H_np = H.cpu().data.numpy()
+        kmeans = KMeans(n_clusters=self.n_clusters, n_init=100, random_state=self.random_state)
+        labels = kmeans.fit_predict(H_np)
 
         return labels
 
-    def _run_simplified(self, X_views):
-        """Simplified deep MVC implementation without external code."""
-        try:
-            import torch
-            import torch.nn as nn
-            from sklearn.preprocessing import MinMaxScaler
-        except ImportError:
-            return self._run_fallback(X_views)
-
-        device = torch.device(self.device)
-        n_views = len(X_views)
-        n_samples = X_views[0].shape[0]
-        dims = [x.shape[1] for x in X_views]
-
-        # Normalize
-        X_normalized = []
-        for x in X_views:
-            scaler = MinMaxScaler()
-            X_normalized.append(scaler.fit_transform(x))
-
-        # Simple autoencoder for each view
-        class SimpleEncoder(nn.Module):
-            def __init__(self, in_dim, hidden_dim, out_dim):
-                super().__init__()
-                self.encoder = nn.Sequential(
-                    nn.Linear(in_dim, hidden_dim),
-                    nn.ReLU(),
-                    nn.Linear(hidden_dim, out_dim)
-                )
-                self.decoder = nn.Sequential(
-                    nn.Linear(out_dim, hidden_dim),
-                    nn.ReLU(),
-                    nn.Linear(hidden_dim, in_dim)
-                )
-                self.cluster = nn.Sequential(
-                    nn.Linear(out_dim, self.n_clusters if hasattr(self, 'n_clusters') else 10),
-                    nn.Softmax(dim=1)
-                )
-
-            def forward(self, x):
-                z = self.encoder(x)
-                x_rec = self.decoder(z)
-                return z, x_rec
-
-        # Build per-view encoders
-        hidden_dim = 256
-        latent_dim = 64
-        encoders = [SimpleEncoder(d, hidden_dim, latent_dim).to(device) for d in dims]
-
-        # Shared cluster layer
-        cluster_layer = nn.Sequential(
-            nn.Linear(latent_dim, self.n_clusters),
-            nn.Softmax(dim=1)
-        ).to(device)
-
-        # Optimizer
-        params = []
-        for enc in encoders:
-            params += list(enc.parameters())
-        params += list(cluster_layer.parameters())
-        optimizer = torch.optim.Adam(params, lr=self.learning_rate)
-
-        # Training
-        X_tensors = [torch.FloatTensor(x).to(device) for x in X_normalized]
-
-        for epoch in range(self.epochs):
-            optimizer.zero_grad()
-
-            loss = 0
-            latents = []
-            for v in range(n_views):
-                z, x_rec = encoders[v](X_tensors[v])
-                latents.append(z)
-                loss += nn.MSELoss()(x_rec, X_tensors[v])
-
-            # Contrastive loss between views
-            for v in range(n_views):
-                for w in range(v + 1, n_views):
-                    sim = torch.mm(latents[v], latents[w].t()) / self.temperature
-                    labels = torch.arange(n_samples).to(device)
-                    loss += 0.1 * nn.CrossEntropyLoss()(sim, labels)
-
-            loss.backward()
-            optimizer.step()
-
-        # Get predictions
-        with torch.no_grad():
-            latents = []
-            for v in range(n_views):
-                z, _ = encoders[v](X_tensors[v])
-                latents.append(z)
-
-            # Average latent representations
-            z_avg = sum(latents) / n_views
-            q = cluster_layer(z_avg)
-            labels = torch.argmax(q, dim=1).cpu().numpy()
-
+    def _run_fallback(self, X_views):
+        """Fallback to simple spectral clustering on concatenated views."""
+        from sklearn.cluster import SpectralClustering
+        import numpy as np
+        
+        # Concatenate all views
+        X_concat = np.hstack(X_views)
+        
+        # Use spectral clustering as fallback
+        spectral = SpectralClustering(
+            n_clusters=self.n_clusters,
+            affinity='nearest_neighbors',
+            n_neighbors=10,
+            random_state=self.random_state
+        )
+        labels = spectral.fit_predict(X_concat)
+        
         return labels
 
 
