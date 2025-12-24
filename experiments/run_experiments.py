@@ -415,6 +415,8 @@ Examples:
     method_group.add_argument('--include_scalable', '--include_deep', action='store_true',
                              dest='include_scalable',
                              help='Include scalable SOTA methods (LMVSC, SMVSC, BMVC, etc.)')
+    method_group.add_argument('--no_scalable', action='store_true',
+                             help='Exclude scalable SOTA methods (useful with --include_all)')
     method_group.add_argument('--include_external', action='store_true',
                              help='Include external methods (SCMVC, etc.) requiring git clone')
     method_group.add_argument('--include_all', action='store_true',
@@ -430,7 +432,7 @@ Examples:
     # Process flags
     spock_only = args.spock_only
     include_traditional = not args.no_traditional and not args.spock_only
-    include_scalable = args.include_scalable or args.include_all
+    include_scalable = (args.include_scalable or args.include_all) and not args.no_scalable
     include_external = args.include_external or args.include_all
 
     # If include_all, also include traditional

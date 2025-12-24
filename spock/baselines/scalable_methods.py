@@ -961,8 +961,8 @@ class SCMVCWrapper(BaseExternalMVC):
         dataset = MVDataset(X_normalized)
         data_loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=True)
 
-        # Initialize model
-        model = Network(n_views, dims, 256, 128, self.n_clusters).to(device)
+        # Initialize model - Network expects (view, input_size, feature_dim, high_feature_dim, device)
+        model = Network(n_views, dims, 256, 128, device)
         optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
 
         # Training
