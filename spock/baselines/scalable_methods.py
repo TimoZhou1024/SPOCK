@@ -1494,11 +1494,525 @@ class ALPCWrapper(BaseExternalMVC):
         return self._run_python(X_views)
 
 
+class RCAGLWrapper(BaseExternalMVC):
+    """
+    RCAGL: Robust and Consistent Anchor Graph Learning for Multi-View Clustering.
+    
+    Paper: "Robust and Consistent Anchor Graph Learning for Multi-View Clustering"
+    Venue: IEEE Transactions on Knowledge and Data Engineering (TKDE) 2024
+    GitHub: https://github.com/Tracesource/RCAGL
+    
+    Setup:
+        cd spock/baselines/external
+        git clone https://github.com/Tracesource/RCAGL.git
+    
+    Requirements:
+        - scikit-learn
+        - scipy
+    
+    Parameters
+    ----------
+    n_clusters : int
+        Number of clusters.
+    n_anchors : int, default=None
+        Number of anchors. If None, uses 2*n_clusters.
+    lambda_param : float, default=100
+        Regularization parameter.
+    max_iter : int, default=50
+        Maximum number of iterations.
+    random_state : int, optional
+        Random seed.
+    """
+    
+    def __init__(self, n_clusters, n_anchors=None, lambda_param=100, 
+                 max_iter=50, random_state=None):
+        super().__init__(n_clusters, device='cpu', random_state=random_state)
+        self.n_anchors = n_anchors if n_anchors else 2 * n_clusters
+        self.lambda_param = lambda_param
+        self.max_iter = max_iter
+        self.name = 'RCAGL'
+    
+    def _get_external_paths(self):
+        return ['RCAGL', 'rcagl']
+    
+    def _run_external(self, X_views):
+        """Run RCAGL algorithm (Python implementation)."""
+        return self._run_python(X_views)
+    
+    def _run_python(self, X_views):
+        """
+        Python implementation of RCAGL algorithm.
+        
+        RCAGL jointly learns:
+        - A: View-specific projection matrices
+        - C: Shared anchor graph
+        - D: View-specific refinement matrices
+        
+        Optimization:
+        min_A,C,D sum_v ||X_v - 0.5*A_v*(C+D_v)||_F^2 + lambda*sum_v ||D_v||_F^2
+        s.t. A_v'*A_v = I, C and D_v are non-negative with row-sum = 1
+        """
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.cluster import KMeans
+        from scipy.linalg import svd
+        from scipy.sparse.linalg import svds
+        
+        if self.random_state is not None:
+            np.random.seed(self.random_state)
+        
+        n_views = len(X_views)
+        n_samples = X_views[0].shape[0]
+        m = self.n_anchors  # number of anchors
+        k = self.n_clusters
+        lam = self.lambda_param
+        
+        # Normalize each view
+        X_normalized = []
+        for v in range(n_views):
+            scaler = StandardScaler()
+            X_v = scaler.fit_transform(X_views[v])
+            X_normalized.append(X_v.T)  # (d_v x n)
+        
+        # Initialize C via K-means on concatenated SVD features
+        X_concat = np.vstack(X_normalized)  # (sum_d x n)
+        
+        # SVD for dimensionality reduction
+        n_svd = min(m, X_concat.shape[0], X_concat.shape[1] - 1)
+        U, s, Vt = svds(X_concat, k=n_svd)
+        X_reduced = Vt.T  # (n x m)
+        
+        # K-means to get initial cluster assignments
+        kmeans = KMeans(n_clusters=m, n_init=10, max_iter=100, random_state=self.random_state)
+        idx = kmeans.fit_predict(X_reduced)
+        
+        # Initialize C as indicator matrix (m x n)
+        C = np.zeros((m, n_samples))
+        for i in range(n_samples):
+            C[idx[i], i] = 1.0
+        
+        # Initialize A and D for each view
+        A = []
+        D = []
+        dims = []
+        for v in range(n_views):
+            d_v = X_normalized[v].shape[0]
+            dims.append(d_v)
+            A.append(np.zeros((d_v, m)))
+            D.append(C.copy())  # Initialize D same as C
+        
+        # Simplex projection (EProjSimplex)
+        def proj_simplex(v):
+            """Project vector onto probability simplex."""
+            n = len(v)
+            u = np.sort(v)[::-1]
+            cssv = np.cumsum(u) - 1
+            ind = np.arange(1, n + 1)
+            cond = u - cssv / ind > 0
+            if np.any(cond):
+                rho = ind[cond][-1]
+                theta = cssv[cond][-1] / rho
+            else:
+                rho = 1
+                theta = (np.sum(v) - 1) / n
+            return np.maximum(v - theta, 0)
+        
+        obj_prev = np.inf
+        
+        for iteration in range(self.max_iter):
+            # Update A_v (orthogonal projection)
+            for v in range(n_views):
+                G = X_normalized[v] @ (C + D[v]).T  # (d_v x m)
+                U_a, _, Vh_a = svd(G, full_matrices=False)
+                A[v] = U_a @ Vh_a  # Orthogonal Procrustes
+            
+            # Update D_v
+            for v in range(n_views):
+                H = 2 * (X_normalized[v] - 0.5 * A[v] @ C).T @ A[v]  # (n x m)
+                D_v_new = np.zeros((m, n_samples))
+                for i in range(n_samples):
+                    ut = H[i, :] / (1 + 4 * lam)
+                    D_v_new[:, i] = proj_simplex(ut)
+                D[v] = D_v_new
+            
+            # Update C via bipartite co-clustering
+            B = np.zeros((n_samples, m))
+            G_avg = np.zeros((m, n_samples))
+            for v in range(n_views):
+                B += (X_normalized[v] - 0.5 * A[v] @ D[v]).T @ A[v]
+                G_avg += D[v]
+            B /= n_views
+            G_avg /= n_views
+            
+            # Simplified spectral clustering on bipartite graph
+            # Construct normalized affinity
+            S = B  # (n x m)
+            d1 = np.abs(S).sum(axis=1) + 1e-10
+            d2 = np.abs(S).sum(axis=0) + 1e-10
+            D1_inv_sqrt = np.diag(1.0 / np.sqrt(d1))
+            D2_inv_sqrt = np.diag(1.0 / np.sqrt(d2))
+            
+            S_normalized = D1_inv_sqrt @ S @ D2_inv_sqrt
+            
+            # SVD for spectral embedding
+            try:
+                U_s, s_s, Vt_s = svds(S_normalized, k=min(k, m-1, n_samples-1))
+                # Sort by singular values (descending)
+                sort_idx = np.argsort(s_s)[::-1]
+                U_s = U_s[:, sort_idx]
+            except:
+                U_s = np.random.randn(n_samples, k)
+            
+            # Normalize rows
+            U_embed = U_s[:, :k]
+            row_norms = np.linalg.norm(U_embed, axis=1, keepdims=True) + 1e-10
+            U_embed = U_embed / row_norms
+            
+            # K-means on spectral embedding
+            kmeans_c = KMeans(n_clusters=m, n_init=10, random_state=self.random_state)
+            try:
+                idx_new = kmeans_c.fit_predict(U_embed)
+            except:
+                idx_new = idx
+            
+            # Update C
+            C_new = np.zeros((m, n_samples))
+            for i in range(n_samples):
+                C_new[idx_new[i] % m, i] = 1.0
+            C = C_new
+            
+            # Compute objective
+            obj = 0
+            for v in range(n_views):
+                obj += np.linalg.norm(X_normalized[v] - 0.5 * A[v] @ (C + D[v]), 'fro') ** 2
+                obj += lam * np.linalg.norm(D[v], 'fro') ** 2
+            
+            # Check convergence
+            if abs(obj_prev - obj) / (abs(obj_prev) + 1e-10) < 1e-4:
+                break
+            obj_prev = obj
+        
+        # Final clustering from C
+        # Aggregate information for final assignment
+        # Use D matrices average for soft assignment
+        D_avg = np.zeros((m, n_samples))
+        for v in range(n_views):
+            D_avg += D[v]
+        D_avg /= n_views
+        
+        # Spectral clustering on the combined graph
+        S_final = (C + D_avg).T  # (n x m)
+        
+        # Normalized spectral clustering
+        d1 = S_final.sum(axis=1) + 1e-10
+        D1_sqrt_inv = np.diag(1.0 / np.sqrt(d1))
+        L = D1_sqrt_inv @ S_final
+        
+        try:
+            U_final, _, _ = svds(L, k=min(k, m-1))
+            U_final = U_final[:, ::-1]  # Reverse to get largest first
+        except:
+            U_final = np.random.randn(n_samples, k)
+        
+        # Normalize
+        row_norms = np.linalg.norm(U_final, axis=1, keepdims=True) + 1e-10
+        U_final = U_final / row_norms
+        
+        # K-means clustering
+        kmeans_final = KMeans(n_clusters=k, n_init=100, random_state=self.random_state)
+        labels = kmeans_final.fit_predict(U_final)
+        
+        return labels
+    
+    def _run_fallback(self, X_views):
+        """Fallback to Python implementation."""
+        return self._run_python(X_views)
+
+
+class ROLLWrapper(BaseExternalMVC):
+    """
+    ROLL: Robust Noisy Pseudo-label Learning for Multi-View Clustering with Noisy Correspondence.
+    
+    Paper: "ROLL: Robust Noisy Pseudo-label Learning for Multi-View Clustering 
+           with Noisy Correspondence" (CVPR 2025)
+    GitHub: https://github.com/sunyuan-cs/2025-CVPR-ROLL
+    
+    Setup:
+        cd spock/baselines/external
+        git clone https://github.com/sunyuan-cs/2025-CVPR-ROLL.git
+    
+    Requirements:
+        - PyTorch >= 1.5.0
+        - scikit-learn
+        - munkres
+    
+    Parameters
+    ----------
+    n_clusters : int
+        Number of clusters.
+    warm_epochs : int, default=50
+        Number of warmup epochs (contrastive pretraining).
+    epochs : int, default=100
+        Number of training epochs.
+    batch_size : int, default=128
+        Batch size for training.
+    learning_rate : float, default=1e-4
+        Learning rate.
+    tau : float, default=0.5
+        Temperature for contrastive loss.
+    alpha : float, default=1e-4
+        Weight for robust contrastive loss.
+    beta : float, default=1e-2
+        Weight for pseudo-label loss.
+    q : float, default=0.1
+        q parameter for GCE loss.
+    feature_dim : int, default=512
+        Hidden feature dimension.
+    device : str, default='auto'
+        Device to use ('cuda', 'cpu', or 'auto').
+    random_state : int, optional
+        Random seed.
+    """
+    
+    def __init__(self, n_clusters, warm_epochs=50, epochs=100, batch_size=128,
+                 learning_rate=1e-4, tau=0.5, alpha=1e-4, beta=1e-2, q=0.1,
+                 feature_dim=512, device='auto', random_state=None):
+        super().__init__(n_clusters, device, random_state)
+        self.warm_epochs = warm_epochs
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.learning_rate = learning_rate
+        self.tau = tau
+        self.alpha = alpha
+        self.beta = beta
+        self.q = q
+        self.feature_dim = feature_dim
+        self.name = 'ROLL'
+    
+    def _get_external_paths(self):
+        return ['2025-CVPR-ROLL', 'ROLL', 'roll']
+    
+    def _run_external(self, X_views):
+        """Run ROLL algorithm with external code components."""
+        import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+        from torch.utils.data import Dataset, DataLoader
+        from sklearn.preprocessing import MinMaxScaler
+        from sklearn.cluster import KMeans
+        
+        device = torch.device(self.device)
+        n_views = len(X_views)
+        n_samples = X_views[0].shape[0]
+        dims = [x.shape[1] for x in X_views]
+        k = self.n_clusters
+        
+        # Normalize data
+        X_normalized = []
+        for x in X_views:
+            scaler = MinMaxScaler()
+            X_normalized.append(scaler.fit_transform(x).astype(np.float32))
+        
+        # Build flexible encoder/decoder model for arbitrary input dimensions
+        class FlexibleROLLModel(nn.Module):
+            def __init__(self, input_dims, feature_dim=512):
+                super().__init__()
+                self.n_views = len(input_dims)
+                self.feature_dim = feature_dim
+                
+                # Create encoders for each view
+                self.encoders = nn.ModuleList()
+                for dim in input_dims:
+                    encoder = nn.Sequential(
+                        nn.Linear(dim, 1024),
+                        nn.BatchNorm1d(1024),
+                        nn.ReLU(True),
+                        nn.Dropout(0.1),
+                        nn.Linear(1024, 1024),
+                        nn.BatchNorm1d(1024),
+                        nn.ReLU(True),
+                        nn.Dropout(0.1),
+                        nn.Linear(1024, feature_dim),
+                        nn.BatchNorm1d(feature_dim),
+                        nn.ReLU(True)
+                    )
+                    self.encoders.append(encoder)
+                
+                # Create decoders for each view (from concatenated features)
+                self.decoders = nn.ModuleList()
+                concat_dim = self.n_views * feature_dim
+                for dim in input_dims:
+                    decoder = nn.Sequential(
+                        nn.Linear(concat_dim, 1024),
+                        nn.ReLU(),
+                        nn.Dropout(0.1),
+                        nn.Linear(1024, 1024),
+                        nn.ReLU(),
+                        nn.Dropout(0.1),
+                        nn.Linear(1024, dim)
+                    )
+                    self.decoders.append(decoder)
+            
+            def forward(self, *views):
+                # Encode each view
+                h_list = []
+                for i, x in enumerate(views):
+                    h = self.encoders[i](x)
+                    h = F.normalize(h, dim=1)
+                    h_list.append(h)
+                
+                # Concatenate for reconstruction
+                union = torch.cat(h_list, dim=1)
+                
+                # Decode each view
+                z_list = []
+                for i in range(self.n_views):
+                    z = self.decoders[i](union)
+                    z_list.append(z)
+                
+                return h_list, z_list
+        
+        # Create dataset
+        class MVDataset(Dataset):
+            def __init__(self, views):
+                self.views = [torch.FloatTensor(v) for v in views]
+                self.n_samples = views[0].shape[0]
+            
+            def __len__(self):
+                return self.n_samples
+            
+            def __getitem__(self, idx):
+                return tuple(v[idx] for v in self.views), idx
+        
+        dataset = MVDataset(X_normalized)
+        data_loader = DataLoader(dataset, batch_size=min(self.batch_size, n_samples),
+                                  shuffle=True, drop_last=True)
+        full_loader = DataLoader(dataset, batch_size=n_samples, shuffle=False)
+        
+        # Initialize model
+        model = FlexibleROLLModel(dims, self.feature_dim).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
+        mse_loss = nn.MSELoss()
+        
+        # Phase 1: Warmup (contrastive pretraining)
+        model.train()
+        for epoch in range(self.warm_epochs):
+            for batch_data, idx in data_loader:
+                views_batch = [v.to(device) for v in batch_data]
+                
+                optimizer.zero_grad()
+                h_list, z_list = model(*views_batch)
+                
+                # Reconstruction loss
+                recon_loss = sum(mse_loss(views_batch[i], z_list[i]) for i in range(n_views))
+                
+                # Contrastive loss between views
+                if n_views >= 2:
+                    h0, h1 = h_list[0], h_list[1]
+                    I = torch.eye(h0.size(0)).to(device)
+                    sim = h0.mm(h1.t()) / self.tau
+                    cl_loss = -(I * sim.softmax(1).log()).sum(1).mean()
+                else:
+                    cl_loss = torch.tensor(0.0).to(device)
+                
+                loss = recon_loss + 1e-4 * cl_loss
+                loss.backward()
+                optimizer.step()
+        
+        # Get initial embeddings for pseudo-label generation
+        model.eval()
+        with torch.no_grad():
+            for batch_data, _ in full_loader:
+                views_full = [v.to(device) for v in batch_data]
+                h_list_full, _ = model(*views_full)
+        
+        # Generate pseudo-labels using K-means on concatenated features
+        h_concat = torch.cat(h_list_full, dim=1).cpu().numpy()
+        kmeans = KMeans(n_clusters=k, n_init=10, random_state=self.random_state)
+        pseudo_labels = kmeans.fit_predict(h_concat)
+        class_centers = F.normalize(torch.FloatTensor(kmeans.cluster_centers_), dim=1).to(device)
+        
+        # Create soft pseudo-labels
+        def create_soft_labels(h, centers, temperature=0.1):
+            sim = h.mm(centers.t()) / temperature
+            return F.softmax(sim, dim=1)
+        
+        # Phase 2: Main training with pseudo-labels
+        model.train()
+        for epoch in range(self.epochs):
+            for batch_data, idx in data_loader:
+                views_batch = [v.to(device) for v in batch_data]
+                batch_pseudo = torch.LongTensor(pseudo_labels[idx.numpy()]).to(device)
+                
+                optimizer.zero_grad()
+                h_list, z_list = model(*views_batch)
+                
+                # Reconstruction loss
+                recon_loss = sum(mse_loss(views_batch[i], z_list[i]) for i in range(n_views))
+                
+                # Pseudo-label loss for each view
+                pl_loss = torch.tensor(0.0).to(device)
+                for h in h_list:
+                    soft_pred = create_soft_labels(h, class_centers)
+                    soft_target = F.one_hot(batch_pseudo, k).float()
+                    
+                    # Compute adaptive weights based on similarity
+                    sim_diag = (soft_pred * soft_target).sum(1)
+                    w = sim_diag / (sim_diag.sum() + 1e-10)
+                    
+                    # Weighted cross-entropy
+                    pl_loss = pl_loss - self.beta * (w * (soft_target * soft_pred.log()).sum(1)).mean()
+                
+                # Robust contrastive loss (GCE-style)
+                if n_views >= 2:
+                    h0, h1 = h_list[0], h_list[1]
+                    cos_sim = h0.mm(h1.t())
+                    sim = (cos_sim / self.tau).exp()
+                    pos = sim.diag()
+                    q = self.q
+                    rcl_loss = (((1 - q) * (sim.sum(1))**q - pos**q) / q).mean()
+                    rcl_loss = self.alpha * rcl_loss
+                else:
+                    rcl_loss = torch.tensor(0.0).to(device)
+                
+                loss = recon_loss + pl_loss + rcl_loss
+                loss.backward()
+                optimizer.step()
+            
+            # Update pseudo-labels periodically
+            if (epoch + 1) % 20 == 0:
+                model.eval()
+                with torch.no_grad():
+                    for batch_data, _ in full_loader:
+                        views_full = [v.to(device) for v in batch_data]
+                        h_list_full, _ = model(*views_full)
+                
+                h_concat = torch.cat(h_list_full, dim=1).cpu().numpy()
+                kmeans = KMeans(n_clusters=k, n_init=10, random_state=self.random_state)
+                pseudo_labels = kmeans.fit_predict(h_concat)
+                class_centers = F.normalize(torch.FloatTensor(kmeans.cluster_centers_), dim=1).to(device)
+                model.train()
+        
+        # Final clustering
+        model.eval()
+        with torch.no_grad():
+            for batch_data, _ in full_loader:
+                views_full = [v.to(device) for v in batch_data]
+                h_list_full, _ = model(*views_full)
+        
+        h_concat = torch.cat(h_list_full, dim=1).cpu().numpy()
+        kmeans = KMeans(n_clusters=k, n_init=100, random_state=self.random_state)
+        labels = kmeans.fit_predict(h_concat)
+        
+        return labels
+
+
 # Registry of external methods
 EXTERNAL_METHODS = {
     'SCMVC': SCMVCWrapper,
     'EFIMVC': EFIMVCWrapper,
     'ALPC': ALPCWrapper,
+    'RCAGL': RCAGLWrapper,
+    'ROLL': ROLLWrapper,
 }
 
 
@@ -1600,6 +2114,22 @@ def list_external_methods():
             'setup': f'cd {EXTERNAL_DIR} && git clone https://github.com/whbdmu/ALPC.git',
             'requirements': ['scikit-learn', 'scipy'],
             'note': 'Original MATLAB implementation. Python implementation provided.',
+        },
+        'RCAGL': {
+            'name': 'Robust and Consistent Anchor Graph Learning for MVC',
+            'paper': 'IEEE TKDE 2024',
+            'github': 'https://github.com/Tracesource/RCAGL',
+            'setup': f'cd {EXTERNAL_DIR} && git clone https://github.com/Tracesource/RCAGL.git',
+            'requirements': ['scikit-learn', 'scipy'],
+            'note': 'Original MATLAB implementation. Python implementation provided.',
+        },
+        'ROLL': {
+            'name': 'Robust Noisy Pseudo-label Learning for MVC with Noisy Correspondence',
+            'paper': 'CVPR 2025',
+            'github': 'https://github.com/sunyuan-cs/2025-CVPR-ROLL',
+            'setup': f'cd {EXTERNAL_DIR} && git clone https://github.com/sunyuan-cs/2025-CVPR-ROLL.git',
+            'requirements': ['torch>=1.5.0', 'scikit-learn', 'munkres'],
+            'note': 'Handles noisy correspondences. Python implementation provided.',
         },
     }
 

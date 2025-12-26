@@ -62,6 +62,8 @@ from .scalable_methods import (
     SCMVCWrapper,
     EFIMVCWrapper,
     ALPCWrapper,
+    RCAGLWrapper,
+    ROLLWrapper,
     get_scalable_methods,
     check_scalable_methods_availability,
     list_external_methods,
