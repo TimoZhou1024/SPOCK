@@ -114,8 +114,8 @@ class SPOCK:
         sinkhorn_iter=100,
         sinkhorn_reg=0.1,
         mu=0.7,
-        gamma=0.06,
-        tau=0.5,
+        gamma=0.1,
+        tau=0.3,
         use_spectral=False,
         random_state=None,
         verbose=False
@@ -1408,23 +1408,22 @@ class SPOCK:
         cols = W_base_coo.col
         vals = W_base_coo.data.copy()
         
-        # Step 6: Compute OT similarity for edges
+        # Step 6: Compute OT similarity for edges (transport profile correlation)
         ot_sims = np.sum(T_norm[rows] * T_norm[cols], axis=1)
         
-        # Step 7: Density similarity
+        # Step 7: Density similarity (penalize edges between different density regions)
         density_sims = 1.0 - np.abs(density[rows] - density[cols])
         
-        # Step 8: Original density correction
-        density_factor = 0.5 + 0.5 * density_sims
+        # Step 8: Convert to multiplicative factors
+        # OT factor: range [0.5, 1.0] - low OT similarity → 50% reduction
+        ot_factor = 0.5 + 0.5 * ot_sims
         
-        # Step 9: Additive OT bonus for high-similarity pairs (paper: gamma=0.06, tau=0.5)
-        # gamma controls OT contribution (~5-10% of avg edge weight)
-        # tau is similarity threshold - only pairs with sim > tau receive bonus
-        ot_bonus = self.gamma * np.maximum(0, ot_sims - self.tau)
+        # Density factor: range [0.7, 1.0] - more conservative, low similarity → 30% reduction  
+        density_factor = 0.7 + 0.3 * density_sims
         
-        # Combined: W' = W * density_factor + ot_bonus (additive fusion per paper)
-        # This is ADDITIVE: local structure (W * density) + global OT bonus
-        vals = vals * density_factor + ot_bonus
+        # Step 9: Multiplicative fusion - both factors contribute
+        # W' = W * ot_factor * density_factor
+        vals = vals * ot_factor * density_factor
         
         # Reconstruct sparse matrix
         W_enhanced = sparse.csr_matrix((vals, (rows, cols)), shape=(N, N))
@@ -1695,83 +1694,156 @@ class SPOCK:
 class SPOCKAblation(SPOCK):
     """
     SPOCK with ablation study support.
-    
+
     Allows disabling specific components for ablation experiments.
-    
-    Ablation modes:
+
+    Ablation modes (for use_spectral=True path):
     - 'full': Complete SPOCK algorithm
-    - 'no_feature_selection': Skip Phase 1 ADMM, use raw normalized features
-    - 'no_density_aware': Disable density-aware graph construction
-    - 'no_ot_alignment': Use simple averaging instead of OT alignment
-    - 'no_nystrom': Force standard spectral clustering
+    - 'no_feature_selection': Skip Phase 1, use truncated raw features (no learning)
+    - 'no_view_weighting': Use uniform view weights instead of learned weights
+    - 'no_ot_enhancement': Disable OT-based graph enhancement (density only)
+    - 'no_density_aware': Disable density-aware edge weighting (OT only)
+    - 'no_graph_enhancement': Disable all graph enhancement (raw KNN graph)
+    - 'no_l21_sparsity': Disable L2,1 sparsity regularization in ADMM
     """
     
+    VALID_MODES = {'full', 'no_feature_selection', 'no_view_weighting',
+                   'no_ot_enhancement', 'no_density_aware', 'no_l21_sparsity',
+                   'no_graph_enhancement'}
+    
     def __init__(self, ablation_mode='full', **kwargs):
+        # Force use_spectral=True for proper ablation testing
+        kwargs['use_spectral'] = True
         super().__init__(**kwargs)
+        if ablation_mode not in self.VALID_MODES:
+            raise ValueError(f"Invalid ablation_mode '{ablation_mode}'. "
+                           f"Valid modes: {self.VALID_MODES}")
         self.ablation_mode = ablation_mode
+        if self.verbose:
+            print(f"[Ablation] Mode: {ablation_mode}")
     
     def _phase1_feature_selection(self, X_views):
         if self.ablation_mode == 'no_feature_selection':
-            # Skip ADMM, just normalize
+            # Skip ADMM - use RANDOM projection (not learned)
+            # This is a weak baseline: random Gaussian projection to same dimension
+            # Random projection preserves some structure but is NOT optimized
             projected_views = []
             projection_matrices = []
             self_expression_matrices = []
-            
+
             for X in X_views:
-                X_normalized = normalize(X, norm='l2', axis=1)
-                projected_views.append(X_normalized)
-                projection_matrices.append(None)
-                self_expression_matrices.append(None)
+                N, D = X.shape
+                d = min(self.proj_dim, D - 1, N - 1)
                 
+                # Random Gaussian projection matrix (not learned!)
+                # This destroys the optimized feature selection while keeping same dim
+                rng = np.random.RandomState(self.random_state)
+                P_random = rng.randn(D, d)
+                P_random, _ = np.linalg.qr(P_random)  # Orthonormalize
+                
+                # Project with random matrix
+                X_proj = X @ P_random
+                X_proj = normalize(X_proj, norm='l2', axis=1)
+                
+                projected_views.append(X_proj)
+                projection_matrices.append(P_random)
+                self_expression_matrices.append(None)
+
             return projected_views, projection_matrices, self_expression_matrices
         else:
             return super()._phase1_feature_selection(X_views)
     
-    def _construct_density_aware_graph(self, X, densities, threshold, sigma):
-        if self.ablation_mode == 'no_density_aware':
-            # Standard KNN graph without density weighting
+    def _admm_optimization(self, X, L, d):
+        """Override ADMM to optionally disable L2,1 sparsity."""
+        if self.ablation_mode == 'no_l21_sparsity':
+            # Use lambda_l21 = 0 to disable sparsity
+            orig_lambda = self.lambda_l21
+            self.lambda_l21 = 0.0
+            result = super()._admm_optimization(X, L, d)
+            self.lambda_l21 = orig_lambda
+            return result
+        else:
+            return super()._admm_optimization(X, L, d)
+    
+    def _phase2_compute_view_weights(self, projected_views):
+        """Override to optionally use uniform weights."""
+        if self.ablation_mode == 'no_view_weighting':
+            # Uniform weights - no quality-based weighting
+            n_views = len(projected_views)
+            return np.ones(n_views) / n_views
+        else:
+            return super()._phase2_compute_view_weights(projected_views)
+    
+    def _ot_enhance_graph(self, X, W_base, knn_indices, density):
+        """Override OT enhancement for ablation."""
+        if self.ablation_mode == 'no_graph_enhancement':
+            # Use DEGRADED graph: add random noise to edge weights
+            # This tests if the OT+Density enhancement actually helps
+            W_base_coo = W_base.tocoo()
+            rows = W_base_coo.row
+            cols = W_base_coo.col
+            vals = W_base_coo.data.copy()
+            
+            # Add significant random noise (±30%) to edge weights
+            rng = np.random.RandomState(self.random_state)
+            noise = 0.7 + 0.6 * rng.rand(len(vals))  # range [0.7, 1.3]
+            vals = vals * noise
+            
             N = X.shape[0]
-            k = min(self.k_neighbors * 2, N - 1)
+            W_noisy = sparse.csr_matrix((vals, (rows, cols)), shape=(N, N))
+            W_noisy = (W_noisy + W_noisy.T) / 2
+            return W_noisy
+        
+        elif self.ablation_mode == 'no_ot_enhancement':
+            # Skip OT - only use density weighting (weaker than full)
+            W_base_coo = W_base.tocoo()
+            rows = W_base_coo.row
+            cols = W_base_coo.col
+            vals = W_base_coo.data.copy()
             
-            nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='auto').fit(X)
-            distances, indices = nbrs.kneighbors(X)
+            # Only density factor - range [0.7, 1.0] reduces some edges
+            density_sims = 1.0 - np.abs(density[rows] - density[cols])
+            density_factor = 0.7 + 0.3 * density_sims
+            vals = vals * density_factor
             
-            G = np.zeros((N, N))
-            for i in range(N):
-                for idx, dist in zip(indices[i, 1:], distances[i, 1:]):
-                    G[i, idx] = np.exp(-dist**2 / (2 * sigma**2))
+            N = X.shape[0]
+            W_enhanced = sparse.csr_matrix((vals, (rows, cols)), shape=(N, N))
+            W_enhanced = (W_enhanced + W_enhanced.T) / 2
+            return W_enhanced
+        
+        elif self.ablation_mode == 'no_density_aware':
+            # Skip density - only use OT weighting (weaker than full)
+            N = X.shape[0]
+            M = min(self.n_clusters * 10, N // 5, 200)
             
-            G = (G + G.T) / 2
-            return G
+            landmarks = self._select_ot_landmarks(X, density, M)
+            X_landmarks = X[landmarks]
+            
+            C = np.zeros((N, M))
+            for m in range(M):
+                diff = X - X_landmarks[m]
+                C[:, m] = np.sum(diff**2, axis=1)
+            
+            C_med = np.median(C)
+            C = C / (C_med + 1e-10)
+            
+            reg = 0.05
+            T = self._sinkhorn_points_to_landmarks(C, reg, n_iter=80)
+            T_norm = T / (np.linalg.norm(T, axis=1, keepdims=True) + 1e-10)
+            
+            W_base_coo = W_base.tocoo()
+            rows = W_base_coo.row
+            cols = W_base_coo.col
+            vals = W_base_coo.data.copy()
+            
+            # Only OT factor - range [0.5, 1.0] reduces some edges
+            ot_sims = np.sum(T_norm[rows] * T_norm[cols], axis=1)
+            ot_factor = 0.5 + 0.5 * ot_sims
+            vals = vals * ot_factor
+            
+            W_enhanced = sparse.csr_matrix((vals, (rows, cols)), shape=(N, N))
+            W_enhanced = (W_enhanced + W_enhanced.T) / 2
+            return W_enhanced
+        
         else:
-            return super()._construct_density_aware_graph(X, densities, threshold, sigma)
-    
-    def _rff_sinkhorn_alignment(self, view_graphs, projected_views, view_densities):
-        if self.ablation_mode == 'no_ot_alignment':
-            # Simple unweighted average
-            n_views = len(view_graphs)
-            view_weights = np.ones(n_views) / n_views
-            consensus = np.mean(view_graphs, axis=0)
-            return consensus, view_weights
-        else:
-            return super()._rff_sinkhorn_alignment(view_graphs, projected_views, view_densities)
-    
-    def _phase3_clustering(self, consensus_graph, n_samples):
-        if self.ablation_mode == 'no_nystrom':
-            # Force standard spectral
-            W = consensus_graph.copy()
-            W = (W + W.T) / 2
-            W[W < 0] = 0
-            
-            Z = self._standard_spectral_embedding(W)
-            self.spectral_embedding_ = Z
-            
-            kmeans = KMeans(
-                n_clusters=self.n_clusters,
-                init='k-means++',
-                n_init=10,
-                random_state=self.random_state
-            )
-            return kmeans.fit_predict(Z)
-        else:
-            return super()._phase3_clustering(consensus_graph, n_samples)
+            return super()._ot_enhance_graph(X, W_base, knn_indices, density)

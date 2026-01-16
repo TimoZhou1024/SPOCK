@@ -30,12 +30,13 @@ from spock.evaluation import evaluate_clustering, MetricTracker
 
 
 # Ablation configurations
+# Must match ablation_mode values in SPOCKAblation class
 ABLATION_CONFIGS = {
     'SPOCK (Full)': 'full',
     'w/o Feature Selection': 'no_feature_selection',
-    'w/o Density-Aware': 'no_density_aware',
-    'w/o OT Alignment': 'no_ot_alignment',
-    'w/ Standard Spectral': 'standard_spectral',
+    'w/o Graph Enhancement': 'no_graph_enhancement',  # No OT, no density
+    'w/o OT Enhancement': 'no_ot_enhancement',        # Density only
+    'w/o Density-Aware': 'no_density_aware',          # OT only
 }
 
 

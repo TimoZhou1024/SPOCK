@@ -2,15 +2,22 @@
 Parameter Sensitivity Analysis for SPOCK
 
 Analyzes the impact of key hyperparameters:
-- α (alpha): self-expression weight
-- β (beta): S sparsity weight
-- λ (lambda_l21): L2,1 regularization
+- α (alpha): Laplacian regularization weight
+- β (beta): S sparsity weight  
+- λ (lambda_l21): L2,1 regularization for P
+- μ (mu): View weighting trade-off
+- γ (gamma): OT bonus strength
+- τ (tau): OT similarity threshold
 - K (k_neighbors): number of neighbors
-- RFF dimension
-- Number of landmarks
+- proj_dim: Projection dimension
+- rff_dim: RFF dimension
+- n_landmarks: Number of landmarks
+- sinkhorn_reg: Sinkhorn regularization
 
 Usage:
-    python run_sensitivity.py --dataset Handwritten --param alpha
+    python run_sensitivity.py --dataset Handwritten --param mu
+    python run_sensitivity.py --dataset Handwritten --param all
+    python run_sensitivity.py --dataset Handwritten --all  # Run all parameters
 """
 
 import os
@@ -30,15 +37,26 @@ from spock.datasets import load_dataset
 from spock.evaluation import evaluate_clustering, MetricTracker
 
 
-# Parameter ranges
+# Parameter ranges - comprehensive coverage
 PARAM_RANGES = {
-    'alpha': [0.001, 0.01, 0.1, 1.0, 10.0, 100.0],
-    'beta': [0.001, 0.01, 0.1, 1.0, 10.0],
-    'lambda_l21': [0.0001, 0.001, 0.01, 0.1, 1.0],
-    'k_neighbors': [5, 10, 15, 20, 30, 50],
-    'rff_dim': [64, 128, 256, 512, 1024],
-    'n_landmarks': [100, 200, 300, 500, 800],
-    'proj_dim': [20, 50, 100, 150, 200],
+    # Phase 1: Feature Selection
+    'alpha': [0.001, 0.01, 0.1, 1.0, 10.0, 100.0],      # Laplacian weight
+    'beta': [0.001, 0.01, 0.1, 1.0, 10.0],              # S sparsity
+    'lambda_l21': [0.0001, 0.001, 0.01, 0.1, 1.0],      # P sparsity
+    'proj_dim': [20, 50, 100, 150, 200],                # Projection dim
+    
+    # Phase 2: View Weighting
+    'mu': [0.0, 0.2, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],  # Density vs compactness
+    
+    # Phase 3: Graph Enhancement  
+    'gamma': [0.0, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3],   # OT bonus strength
+    'tau': [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],   # OT threshold
+    'k_neighbors': [5, 10, 15, 20, 30, 50],             # KNN neighbors
+    'sinkhorn_reg': [0.01, 0.05, 0.1, 0.2, 0.5, 1.0],  # Sinkhorn regularization
+    
+    # Scalability parameters
+    'rff_dim': [64, 128, 256, 512, 1024],              # RFF dimension
+    'n_landmarks': [100, 200, 300, 500, 800],          # Landmarks for Nystrom
 }
 
 
@@ -84,16 +102,26 @@ def run_sensitivity_analysis(dataset_name, param_name, n_runs=5,
     y_true = dataset.labels
     n_clusters = dataset.n_clusters
     
-    # Default parameters
+    # Default parameters (matching SPOCK defaults)
     default_params = {
         'n_clusters': n_clusters,
+        # Phase 1
         'alpha': 1.0,
         'beta': 0.1,
         'lambda_l21': 0.01,
-        'k_neighbors': 10,
         'proj_dim': min(100, min(v.shape[1] for v in X_views)),
+        # Phase 2
+        'mu': 0.7,
+        # Phase 3
+        'gamma': 0.1,
+        'tau': 0.3,
+        'k_neighbors': 10,
+        'sinkhorn_reg': 0.1,
+        # Scalability
         'rff_dim': 256,
         'n_landmarks': min(500, dataset.n_samples // 2),
+        # Other
+        'use_spectral': True,  # Use spectral mode for sensitivity
         'verbose': False
     }
     
@@ -266,8 +294,10 @@ def main():
     parser = argparse.ArgumentParser(description='SPOCK Parameter Sensitivity Analysis')
     parser.add_argument('--dataset', type=str, default='Handwritten',
                        help='Dataset name')
-    parser.add_argument('--param', type=str, default='all',
-                       help='Parameter name or "all" for all parameters')
+    parser.add_argument('--param', type=str, default=None,
+                       help='Parameter name (e.g., mu, gamma, tau, alpha, etc.)')
+    parser.add_argument('--all', action='store_true',
+                       help='Run sensitivity analysis for ALL parameters')
     parser.add_argument('--n_runs', type=int, default=5,
                        help='Number of runs per setting')
     parser.add_argument('--save_dir', type=str, default='./results/sensitivity',
@@ -277,20 +307,33 @@ def main():
     
     args = parser.parse_args()
     
-    if args.param.lower() == 'all':
+    # Print available parameters
+    print(f"Available parameters: {list(PARAM_RANGES.keys())}")
+    
+    if args.all or (args.param and args.param.lower() == 'all'):
+        # Run all parameters
+        print("\n>>> Running sensitivity analysis for ALL parameters <<<\n")
         run_all_sensitivity(
             args.dataset,
             n_runs=args.n_runs,
             save_dir=args.save_dir,
             random_seed=args.seed
         )
-    else:
+    elif args.param:
+        # Run single parameter
         run_sensitivity_analysis(
             args.dataset, args.param,
             n_runs=args.n_runs,
             save_dir=args.save_dir,
             random_seed=args.seed
         )
+    else:
+        # No parameter specified - show help
+        parser.print_help()
+        print("\n\nExamples:")
+        print("  python run_sensitivity.py --dataset Handwritten --param mu")
+        print("  python run_sensitivity.py --dataset Handwritten --param gamma")
+        print("  python run_sensitivity.py --dataset Handwritten --all")
 
 
 if __name__ == '__main__':

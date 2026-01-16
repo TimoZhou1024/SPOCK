@@ -1686,9 +1686,11 @@ class RCAGLWrapper(BaseExternalMVC):
                 obj += np.linalg.norm(X_normalized[v] - 0.5 * A[v] @ (C + D[v]), 'fro') ** 2
                 obj += lam * np.linalg.norm(D[v], 'fro') ** 2
             
-            # Check convergence
-            if abs(obj_prev - obj) / (abs(obj_prev) + 1e-10) < 1e-4:
-                break
+            # Check convergence (handle inf/nan cases)
+            if np.isfinite(obj) and np.isfinite(obj_prev):
+                rel_change = abs(obj_prev - obj) / (abs(obj_prev) + 1e-10)
+                if rel_change < 1e-4:
+                    break
             obj_prev = obj
         
         # Final clustering from C
@@ -1929,7 +1931,17 @@ class ROLLWrapper(BaseExternalMVC):
         h_concat = torch.cat(h_list_full, dim=1).cpu().numpy()
         kmeans = KMeans(n_clusters=k, n_init=10, random_state=self.random_state)
         pseudo_labels = kmeans.fit_predict(h_concat)
-        class_centers = F.normalize(torch.FloatTensor(kmeans.cluster_centers_), dim=1).to(device)
+        
+        # Create view-specific class centers by computing mean of each view's features per cluster
+        class_centers_list = []
+        for v in range(n_views):
+            h_v = h_list_full[v].cpu().numpy()
+            centers_v = np.zeros((k, self.feature_dim))
+            for c in range(k):
+                mask = pseudo_labels == c
+                if mask.sum() > 0:
+                    centers_v[c] = h_v[mask].mean(axis=0)
+            class_centers_list.append(F.normalize(torch.FloatTensor(centers_v), dim=1).to(device))
         
         # Create soft pseudo-labels
         def create_soft_labels(h, centers, temperature=0.1):
@@ -1951,8 +1963,8 @@ class ROLLWrapper(BaseExternalMVC):
                 
                 # Pseudo-label loss for each view
                 pl_loss = torch.tensor(0.0).to(device)
-                for h in h_list:
-                    soft_pred = create_soft_labels(h, class_centers)
+                for v_idx, h in enumerate(h_list):
+                    soft_pred = create_soft_labels(h, class_centers_list[v_idx])
                     soft_target = F.one_hot(batch_pseudo, k).float()
                     
                     # Compute adaptive weights based on similarity
@@ -1989,7 +2001,15 @@ class ROLLWrapper(BaseExternalMVC):
                 h_concat = torch.cat(h_list_full, dim=1).cpu().numpy()
                 kmeans = KMeans(n_clusters=k, n_init=10, random_state=self.random_state)
                 pseudo_labels = kmeans.fit_predict(h_concat)
-                class_centers = F.normalize(torch.FloatTensor(kmeans.cluster_centers_), dim=1).to(device)
+                # Update view-specific class centers
+                for v in range(n_views):
+                    h_v = h_list_full[v].cpu().numpy()
+                    centers_v = np.zeros((k, self.feature_dim))
+                    for c in range(k):
+                        mask = pseudo_labels == c
+                        if mask.sum() > 0:
+                            centers_v[c] = h_v[mask].mean(axis=0)
+                    class_centers_list[v] = F.normalize(torch.FloatTensor(centers_v), dim=1).to(device)
                 model.train()
         
         # Final clustering
@@ -2006,6 +2026,287 @@ class ROLLWrapper(BaseExternalMVC):
         return labels
 
 
+class DMACWrapper(BaseExternalMVC):
+    """
+    DMAC: Deep Multi-view Anchor Clustering.
+    
+    Paper: "Towards Learnable Anchor for Deep Multi-View Clustering" (AAAI 2025)
+    GitHub: https://github.com/drongwbc/DMAC-AAAI25
+    
+    Setup:
+        cd spock/baselines/external
+        git clone https://github.com/drongwbc/DMAC-AAAI25.git
+    
+    Requirements:
+        - PyTorch >= 2.0.0
+        - scikit-learn
+        - scipy
+    
+    Parameters
+    ----------
+    n_clusters : int
+        Number of clusters.
+    hidden_size : int, default=256
+        Hidden layer size in encoder/decoder.
+    emblem_size : int, default=64
+        Embedding dimension.
+    pre_epochs : int, default=100
+        Number of pretraining epochs.
+    epochs : int, default=100
+        Number of training epochs.
+    lr1 : float, default=1e-3
+        Learning rate for pretraining.
+    lr2 : float, default=1e-4
+        Learning rate for training.
+    alpha : float, default=0.1
+        Weight for structure loss.
+    beta : float, default=0.1
+        Weight for mutual information loss.
+    device : str, default='auto'
+        Device to use ('cuda', 'cpu', or 'auto').
+    random_state : int, optional
+        Random seed.
+    """
+    
+    def __init__(self, n_clusters, hidden_size=256, emblem_size=64,
+                 pre_epochs=100, epochs=100, lr1=1e-3, lr2=1e-4,
+                 alpha=0.1, beta=0.1, device='auto', random_state=None):
+        super().__init__(n_clusters, device, random_state)
+        self.hidden_size = hidden_size
+        self.emblem_size = emblem_size
+        self.pre_epochs = pre_epochs
+        self.epochs = epochs
+        self.lr1 = lr1
+        self.lr2 = lr2
+        self.alpha = alpha
+        self.beta = beta
+        self.name = 'DMAC'
+    
+    def _get_external_paths(self):
+        return ['DMAC-AAAI25', 'DMAC', 'dmac']
+    
+    def _run_external(self, X_views):
+        """Run DMAC algorithm."""
+        import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+        from torch.optim import RMSprop
+        from sklearn.cluster import KMeans
+        from sklearn.preprocessing import normalize
+        import math
+        
+        device = torch.device(self.device)
+        n_views = len(X_views)
+        n_samples = X_views[0].shape[0]
+        dims = [x.shape[1] for x in X_views]
+        k = self.n_clusters
+        
+        # Normalize data
+        X_normalized = []
+        for x in X_views:
+            x_norm = normalize(x, norm='l2')
+            X_normalized.append(torch.FloatTensor(x_norm).to(device))
+        
+        # Compute anchor number
+        anchor_num = math.floor(math.sqrt(n_samples * k))
+        neighbor = 5
+        init_nei = neighbor
+        upper = math.floor(anchor_num / k)
+        
+        # Helper functions from DMAC
+        def distance(X, Y, square=True):
+            n = X.shape[1]
+            m = Y.shape[1]
+            x = torch.norm(X, dim=0)
+            x = x * x
+            x = torch.t(x.repeat(m, 1))
+            y = torch.norm(Y, dim=0)
+            y = y * y
+            y = y.repeat(n, 1)
+            crossing_term = torch.t(X).matmul(Y)
+            result = x + y - 2 * crossing_term
+            result = result.relu()
+            if not square:
+                result = torch.sqrt(result)
+            return result
+        
+        def construct_anchor_graph(Z, anchor, k_neighbor):
+            distances = distance(Z.t(), anchor.t(), square=True)
+            sorted_distances, _ = distances.sort(dim=1)
+            top_k = sorted_distances[:, k_neighbor]
+            top_k = torch.t(top_k.repeat(distances.shape[1], 1)) + 1e-10
+            sum_top_k = torch.sum(sorted_distances[:, 0:k_neighbor], dim=1)
+            sum_top_k = torch.t(sum_top_k.repeat(distances.shape[1], 1))
+            weights = torch.div(top_k - distances, k_neighbor * top_k - sum_top_k + 1e-7)
+            weights = weights.relu()
+            return weights
+        
+        def anchor_selection_loss(Z, anchor, v=1):
+            q = 1.0 / (1.0 + torch.sum(
+                torch.pow(Z.unsqueeze(1) - anchor, 2), 2) / v)
+            q = q.pow((v + 1.0) / 2.0)
+            q = (q.t() / torch.sum(q, 1)).t()
+            q = torch.clamp(q, min=1e-12)
+            loss = torch.mean(-torch.sum(q * torch.log(q), dim=1))
+            return loss
+        
+        def mi_loss(Q1, Q2):
+            joint_prob = Q1.unsqueeze(2) * Q2.unsqueeze(1)
+            p_marginal = joint_prob.sum(dim=2, keepdim=True)
+            q_marginal = joint_prob.sum(dim=1, keepdim=True)
+            joint_prob = torch.clamp(joint_prob, min=1e-10)
+            p_marginal = torch.clamp(p_marginal, min=1e-10)
+            q_marginal = torch.clamp(q_marginal, min=1e-10)
+            mi = (joint_prob * torch.log(joint_prob / (p_marginal * q_marginal))).sum(dim=(1, 2))
+            return -mi.mean()
+        
+        def structure_loss(Z, A):
+            p_D = torch.pinverse(torch.diag(torch.sum(A, dim=0)))
+            t = torch.mm(Z.T, Z) - torch.mm(torch.mm(torch.mm(torch.mm(Z.T, A), p_D), A.T), Z)
+            loss = torch.trace(t)
+            return loss.mean()
+        
+        # DMAC Model
+        class DMACModel(nn.Module):
+            def __init__(self, num_features, hidden_size, emblem_size, views, n_clusters):
+                super().__init__()
+                self.views = views
+                
+                # Encoder
+                self.encoder_l1 = nn.ModuleList([
+                    nn.Linear(num_features[i], hidden_size, bias=True) for i in range(views)
+                ])
+                self.encoder_l2 = nn.ModuleList([
+                    nn.Linear(hidden_size, emblem_size, bias=True) for i in range(views)
+                ])
+                
+                # Decoder
+                self.decoder_l1 = nn.ModuleList([
+                    nn.Linear(emblem_size, hidden_size, bias=True) for i in range(views)
+                ])
+                self.decoder_l2 = nn.ModuleList([
+                    nn.Linear(hidden_size, num_features[i], bias=True) for i in range(views)
+                ])
+                
+                # Noise Generator
+                self.mu = nn.Linear(emblem_size, emblem_size, bias=True)
+                self.zita = nn.Linear(emblem_size, emblem_size, bias=True)
+                self.prelu_weight = nn.Parameter(torch.Tensor(emblem_size).fill_(0.25))
+                
+                # Anchor Graph Convolution
+                self.agcn_l1 = nn.ModuleList([
+                    nn.Linear(emblem_size, int(emblem_size / 4), bias=False) for i in range(views)
+                ])
+                self.agcn_l2 = nn.ModuleList([
+                    nn.Linear(int(emblem_size / 4), n_clusters, bias=False) for i in range(views)
+                ])
+            
+            def anchor_convolution(self, A, F_mat):
+                p_D = torch.pinverse(torch.diag(torch.sum(A, dim=0)))
+                t1 = torch.mm(A, F_mat)
+                t2 = torch.mm(A.T, t1)
+                t3 = torch.mm(p_D, t2)
+                return t3
+            
+            def forward(self, X, anchor_num, neighbor_k, preTrain=False):
+                # Encoder
+                Z = []
+                for i in range(self.views):
+                    tmp_z = F.leaky_relu(self.encoder_l1[i](X[i]))
+                    tmp_z = F.leaky_relu(self.encoder_l2[i](tmp_z))
+                    tmp_z = F.normalize(tmp_z, p=2, dim=1)
+                    Z.append(tmp_z)
+                
+                # Fusion
+                fuse_Z = sum(Z) / self.views
+                fuse_Z = F.normalize(fuse_Z, p=2, dim=1)
+                
+                if preTrain:
+                    rec_X = []
+                    for i in range(self.views):
+                        tmp_X = F.leaky_relu(self.decoder_l1[i](fuse_Z))
+                        tmp_X = F.leaky_relu(self.decoder_l2[i](tmp_X))
+                        tmp_X = F.normalize(tmp_X, p=2, dim=1)
+                        rec_X.append(tmp_X)
+                    return rec_X
+                
+                # Learnable anchor with noise
+                anchor = KMeans(n_clusters=anchor_num, n_init=1,
+                               init='k-means++').fit(fuse_Z.detach().cpu().numpy()).cluster_centers_
+                anchor = torch.tensor(anchor, requires_grad=True, dtype=torch.float32).to(fuse_Z.device)
+                
+                mvn = torch.distributions.MultivariateNormal(
+                    torch.zeros(anchor.size(1)), torch.eye(anchor.size(1)))
+                noise = mvn.sample((anchor.size(0),)).to(anchor.device)
+                mu = F.prelu(self.mu(anchor), self.prelu_weight)
+                zita = F.relu(self.zita(anchor))
+                anchor = anchor + (mu + torch.mul(zita, noise))
+                anchor = F.normalize(anchor, p=2, dim=1)
+                
+                # Anchor graph learning
+                A = []
+                for i in range(self.views):
+                    tmp_A = construct_anchor_graph(Z[i], anchor, neighbor_k)
+                    A.append(tmp_A)
+                
+                # Anchor graph convolution
+                Q = []
+                for i in range(self.views):
+                    tmp_Q = F.leaky_relu(self.agcn_l1[i](self.anchor_convolution(A[i], anchor)))
+                    tmp_Q = F.softmax(self.agcn_l2[i](self.anchor_convolution(A[i], tmp_Q)), dim=1)
+                    Q.append(tmp_Q)
+                
+                return Z, anchor, fuse_Z, A, Q
+        
+        # Initialize model
+        model = DMACModel(dims, self.hidden_size, self.emblem_size, n_views, k).to(device)
+        
+        # Pretraining
+        if self.pre_epochs > 0:
+            optimizer = RMSprop(model.parameters(), lr=self.lr1)
+            mse = nn.MSELoss()
+            model.train()
+            for epoch in range(self.pre_epochs):
+                rec_X = model(X_normalized, anchor_num, neighbor, preTrain=True)
+                loss = sum(mse(X_normalized[i], rec_X[i]) for i in range(n_views))
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+        
+        # Main training
+        optimizer = RMSprop(model.parameters(), lr=self.lr2)
+        model.train()
+        for epoch in range(self.epochs):
+            Z, anchor, fuse_Z, A, Q = model(X_normalized, anchor_num, neighbor)
+            
+            l1 = sum(anchor_selection_loss(Z[i], anchor) for i in range(n_views))
+            l2 = sum(structure_loss(fuse_Z, A[i]) for i in range(n_views))
+            l3 = torch.tensor(0.0).to(device)
+            for i in range(n_views):
+                for j in range(i + 1, n_views):
+                    l3 = l3 + mi_loss(Q[i], Q[j])
+            
+            loss = l1 + self.alpha * l2 + self.beta * l3
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            # Update neighbor periodically
+            if epoch > 0 and epoch % 20 == 0:
+                neighbor = min(neighbor + init_nei, upper)
+        
+        # Final clustering
+        model.eval()
+        with torch.no_grad():
+            Z, anchor, fuse_Z, A, Q = model(X_normalized, anchor_num, neighbor)
+        
+        labels = KMeans(n_clusters=k, n_init=10, random_state=self.random_state).fit_predict(
+            fuse_Z.cpu().numpy()
+        )
+        
+        return labels
+
+
 # Registry of external methods
 EXTERNAL_METHODS = {
     'SCMVC': SCMVCWrapper,
@@ -2013,6 +2314,7 @@ EXTERNAL_METHODS = {
     'ALPC': ALPCWrapper,
     'RCAGL': RCAGLWrapper,
     'ROLL': ROLLWrapper,
+    'DMAC': DMACWrapper,
 }
 
 
