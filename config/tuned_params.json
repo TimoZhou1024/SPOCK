@@ -38,5 +38,68 @@
     "metric": "ACC",
     "n_trials": 5,
     "timestamp": "2025-12-11T12:33:53"
+  },
+  "bbcsport_robustness_both": {
+    "params": {
+      "alpha": 0.14566485572779833,
+      "beta": 0.23078156231929717,
+      "lambda_l21": 0.0035318796364360227,
+      "proj_dim": 92,
+      "k_neighbors": 13,
+      "n_landmarks": 255,
+      "mu": 0.9161590054587265,
+      "gamma": 0.05384507210175999,
+      "tau": 0.470297523413299,
+      "sinkhorn_reg": 0.049097045261062885,
+      "use_spectral": false,
+      "rff_dim": 128
+    },
+    "best_value": 0.6215441176470587,
+    "metric": "ACC",
+    "robustness_mode": "both",
+    "n_trials": 100,
+    "timestamp": "2026-01-17T06:13:18.215672"
+  },
+  "handwritten_robustness_both": {
+    "params": {
+      "alpha": 3.836508793721617,
+      "beta": 0.40471025281867756,
+      "lambda_l21": 0.07939808991434144,
+      "proj_dim": 4,
+      "k_neighbors": 5,
+      "n_landmarks": 251,
+      "mu": 0.3380694427723856,
+      "gamma": 0.046763213115282476,
+      "tau": 0.6356765198721332,
+      "sinkhorn_reg": 0.0450184953240096,
+      "use_spectral": true,
+      "rff_dim": 256
+    },
+    "best_value": 0.7776533333333333,
+    "metric": "ACC",
+    "robustness_mode": "both",
+    "n_trials": 100,
+    "timestamp": "2026-01-17T06:24:29.211795"
+  },
+  "nuswide_robustness_both": {
+    "params": {
+      "alpha": 3.453073363478954,
+      "beta": 0.0974028574187095,
+      "lambda_l21": 0.00924269294112403,
+      "proj_dim": 52,
+      "k_neighbors": 24,
+      "n_landmarks": 722,
+      "mu": 0.39891016575153526,
+      "gamma": 0.013380223795249908,
+      "tau": 0.6306354181020537,
+      "sinkhorn_reg": 0.17877329590099142,
+      "use_spectral": false,
+      "rff_dim": 256
+    },
+    "best_value": 0.14916000000000001,
+    "metric": "ACC",
+    "robustness_mode": "both",
+    "n_trials": 100,
+    "timestamp": "2026-01-17T07:41:06.723194"
   }
 }
