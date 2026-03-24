@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from spock import SPOCK
 from spock.datasets import load_dataset, get_available_datasets
-from spock.baselines import get_baseline_methods
+from spock.baselines import get_baseline_methods, EXTERNAL_METHODS
 from spock.evaluation import evaluate_clustering
 
 
@@ -72,7 +72,10 @@ INCOMPLETE_METHODS = {'SPOCK', 'EFIMVC', 'SCMVC'}
 UNALIGNED_METHODS = {'SPOCK', 'ROLL', 'SCMVC'}
 
 # General methods (work on any data)
-GENERAL_METHODS = {'RCAGL', 'ALPC', 'LMVSC', 'SMVSC', 'FMCNOF', 'EOMSC-CA', 'BMVC'}
+GENERAL_METHODS = {
+    'RCAGL', 'ALPC', 'LMVSC', 'SMVSC', 'FMCNOF', 'EOMSC-CA', 'BMVC',
+    'DMAC', 'SparseMVC', 'BRIDGE', 'PROTOCOL'
+}
 
 
 def filter_methods_by_test_type(methods: dict, test_type: str,
@@ -279,42 +282,24 @@ def impute_missing_views(views, mask, method='mean'):
 def get_comparison_methods(n_clusters, include_external=True):
     """
     Get comparison methods for robustness testing.
-    
-    Returns external methods (SCMVC, EFIMVC, ALPC, RCAGL, ROLL) for comparison.
+
+    Returns all registered external methods dynamically so newly added
+    methods are available without updating this script.
     """
-    methods = {}
-    
-    if include_external:
-        try:
-            from spock.baselines import SCMVCWrapper
-            methods['SCMVC'] = SCMVCWrapper(n_clusters=n_clusters, pre_epochs=50, con_epochs=20)
-        except Exception as e:
-            print(f"Warning: Could not load SCMVC: {e}")
-        
-        try:
-            from spock.baselines import EFIMVCWrapper
-            methods['EFIMVC'] = EFIMVCWrapper(n_clusters=n_clusters)
-        except Exception as e:
-            print(f"Warning: Could not load EFIMVC: {e}")
-        
-        try:
-            from spock.baselines import ALPCWrapper
-            methods['ALPC'] = ALPCWrapper(n_clusters=n_clusters)
-        except Exception as e:
-            print(f"Warning: Could not load ALPC: {e}")
-        
-        try:
-            from spock.baselines import RCAGLWrapper
-            methods['RCAGL'] = RCAGLWrapper(n_clusters=n_clusters)
-        except Exception as e:
-            print(f"Warning: Could not load RCAGL: {e}")
-        
-        try:
-            from spock.baselines import ROLLWrapper
-            methods['ROLL'] = ROLLWrapper(n_clusters=n_clusters, warm_epochs=20, epochs=50)
-        except Exception as e:
-            print(f"Warning: Could not load ROLL: {e}")
-    
+    if not include_external:
+        return {}
+
+    candidate_methods = get_baseline_methods(
+        n_clusters=n_clusters,
+        include_deep=True,
+        include_external=True
+    )
+
+    external_names = set(EXTERNAL_METHODS.keys())
+    methods = {
+        name: method for name, method in candidate_methods.items()
+        if name in external_names
+    }
     return methods
 
 

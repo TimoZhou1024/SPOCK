@@ -2307,6 +2307,748 @@ class DMACWrapper(BaseExternalMVC):
         return labels
 
 
+class SparseMVCWrapper(BaseExternalMVC):
+    """
+    SparseMVC: Probing Cross-view Sparsity Variations for Multi-view Clustering.
+    
+    Paper: "SparseMVC: Probing Cross-view Sparsity Variations for Multi-view Clustering" (NeurIPS 2025 Spotlight)
+    GitHub: https://github.com/cleste-pome/SparseMVC
+    
+    Setup:
+        cd spock/baselines/external
+        git clone https://github.com/cleste-pome/SparseMVC.git
+    
+    Requirements:
+        - PyTorch >= 1.13.1
+        - scikit-learn
+        - scipy
+        - numpy >= 1.21.6
+    
+    Parameters
+    ----------
+    n_clusters : int
+        Number of clusters.
+    feature_dim : int, default=64
+        Embedding dimension for encoders/decoders.
+    high_feature_dim : int, default=20
+        High-level feature dimension for fusion.
+    pre_epochs : int, default=300
+        Number of pretraining epochs.
+    epochs : int, default=300
+        Number of training epochs with contrastive loss.
+    learning_rate : float, default=3e-4
+        Learning rate for training.
+    batch_size : int, default=256
+        Batch size for training.
+    sparse_rho : float, default=0.05
+        Sparsity target value for KL divergence.
+    sparse_beta : float, default=1.0
+        Weight for sparse regularization loss.
+    dropout_rate : float, default=0.2
+        Dropout rate in encoder/decoder.
+    device : str, default='auto'
+        Device to use ('cuda', 'cpu', or 'auto').
+    random_state : int, optional
+        Random seed.
+    """
+    
+    def __init__(self, n_clusters, feature_dim=64, high_feature_dim=20,
+                 pre_epochs=300, epochs=300, learning_rate=3e-4, batch_size=256,
+                 sparse_rho=0.05, sparse_beta=1.0, dropout_rate=0.2,
+                 device='auto', random_state=None):
+        super().__init__(n_clusters, device, random_state)
+        self.feature_dim = feature_dim
+        self.high_feature_dim = high_feature_dim
+        self.pre_epochs = pre_epochs
+        self.epochs = epochs
+        self.learning_rate = learning_rate
+        self.batch_size = batch_size
+        self.sparse_rho = sparse_rho
+        self.sparse_beta = sparse_beta
+        self.dropout_rate = dropout_rate
+        self.name = 'SparseMVC'
+    
+    def _get_external_paths(self):
+        return ['SparseMVC', 'sparsemvc']
+    
+    def _run_external(self, X_views):
+        """Run SparseMVC algorithm."""
+        import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+        from torch.optim import Adam
+        from torch.utils.data import DataLoader, TensorDataset
+        from sklearn.cluster import KMeans
+        from sklearn.preprocessing import normalize
+        
+        device = torch.device(self.device)
+        n_views = len(X_views)
+        n_samples = X_views[0].shape[0]
+        dims = [x.shape[1] for x in X_views]
+        k = self.n_clusters
+        batch_size = min(self.batch_size, n_samples)
+        
+        # Normalize data
+        X_normalized = []
+        for x in X_views:
+            x_norm = normalize(x, norm='l2')
+            X_normalized.append(torch.FloatTensor(x_norm).to(device))
+        
+        # Encoder: Adaptive sparse encoder
+        class SparseEncoder(nn.Module):
+            def __init__(self, input_dim, feature_dim, dropout_rate=0.2, sparse_at=(1, 4, 7)):
+                super().__init__()
+                self.sparse_at = set(sparse_at)
+                self.encoder = nn.Sequential(
+                    nn.Linear(input_dim, 500),     # 0
+                    nn.ReLU(),                    # 1  ← Sparse layer
+                    nn.Dropout(dropout_rate),    # 2
+                    nn.Linear(500, 500),          # 3
+                    nn.ReLU(),                    # 4  ← Sparse layer
+                    nn.Dropout(dropout_rate),    # 5
+                    nn.Linear(500, 2000),         # 6
+                    nn.ReLU(),                    # 7  ← Sparse layer
+                    nn.Dropout(dropout_rate),    # 8
+                    nn.Linear(2000, feature_dim), # 9 (output)
+                )
+            
+            def forward(self, x):
+                sparse_acts = []
+                for i, layer in enumerate(self.encoder):
+                    x = layer(x)
+                    if i in self.sparse_at:
+                        sparse_acts.append(x)
+                return x, sparse_acts
+        
+        # Decoder
+        class AutoDecoder(nn.Module):
+            def __init__(self, input_dim, feature_dim, dropout_rate=0.2):
+                super().__init__()
+                self.decoder = nn.Sequential(
+                    nn.Linear(feature_dim, 2000),
+                    nn.ReLU(),
+                    nn.Dropout(dropout_rate),
+                    nn.Linear(2000, 500),
+                    nn.ReLU(),
+                    nn.Dropout(dropout_rate),
+                    nn.Linear(500, 500),
+                    nn.ReLU(),
+                    nn.Dropout(dropout_rate),
+                    nn.Linear(500, input_dim)
+                )
+            
+            def forward(self, x):
+                return self.decoder(x)
+        
+        # KL divergence for sparsity
+        def kl_divergence(rho, rho_hat):
+            rho_hat = torch.clamp(rho_hat, 1e-6, 1 - 1e-6)
+            return rho * torch.log(rho / rho_hat) + (1 - rho) * torch.log((1 - rho) / (1 - rho_hat))
+        
+        def kl_sparse_loss(activations, rho, sparse_beta):
+            kl_total = 0.0
+            for act in activations:
+                rho_hat = torch.mean(act, dim=0)
+                kl_loss = kl_divergence(rho, rho_hat).mean()
+                kl_total += kl_loss
+            return sparse_beta * kl_total / (len(activations) + 1e-10)
+        
+        # Contrastive loss
+        class ContrastiveLoss(nn.Module):
+            def __init__(self, batch_size, temperature=1.0):
+                super().__init__()
+                self.batch_size = batch_size
+                self.temperature = temperature
+            
+            def forward(self, h_i, h_j, weight=None):
+                N = h_i.shape[0]
+                h_i = F.normalize(h_i, dim=1)
+                h_j = F.normalize(h_j, dim=1)
+                
+                similarity = torch.matmul(h_i, h_j.T) / self.temperature
+                positives = torch.diag(similarity)
+                
+                mask = torch.ones((N, N), device=h_i.device)
+                mask.fill_diagonal_(0)
+                
+                numerator = torch.exp(positives)
+                denominator = (torch.exp(similarity) * mask).sum(dim=1)
+                
+                loss = -torch.log(numerator / (denominator + 1e-10)).mean()
+                
+                if weight is not None:
+                    loss = weight * loss
+                
+                return loss
+        
+        # SparseMVC Network
+        class SparseMVCNetwork(nn.Module):
+            def __init__(self, input_dims, feature_dim, high_feature_dim, device):
+                super().__init__()
+                self.feature_dim = feature_dim
+                self.high_feature_dim = high_feature_dim
+                self.n_views = len(input_dims)
+                
+                # Multi-view encoders and decoders
+                self.encoders = nn.ModuleList([
+                    SparseEncoder(input_dims[v], feature_dim, dropout_rate=0.2)
+                    for v in range(self.n_views)
+                ])
+                
+                self.decoders = nn.ModuleList([
+                    AutoDecoder(input_dims[v], feature_dim, dropout_rate=0.2)
+                    for v in range(self.n_views)
+                ])
+                
+                # Concatenated encoder/decoder
+                concat_dim = sum(input_dims)
+                self.concat_encoder = SparseEncoder(concat_dim, feature_dim, dropout_rate=0.2)
+                self.concat_decoder = AutoDecoder(concat_dim, feature_dim, dropout_rate=0.2)
+                
+                # Fusion module
+                self.fusion = nn.Sequential(
+                    nn.Linear(feature_dim, 256),
+                    nn.ReLU(),
+                    nn.Linear(256, high_feature_dim)
+                )
+                
+                # Common information module
+                self.common_info = nn.Sequential(
+                    nn.Linear(feature_dim, high_feature_dim)
+                )
+            
+            def forward(self, X_views):
+                # Encode each view
+                features = []
+                sparse_acts = []
+                
+                for v in range(self.n_views):
+                    feat, acts = self.encoders[v](X_views[v])
+                    features.append(feat)
+                    sparse_acts.append(acts)
+                
+                # Concatenate and encode all views
+                X_concat = torch.cat(X_views, dim=1)
+                feat_concat, acts_concat = self.concat_encoder(X_concat)
+                sparse_acts.append(acts_concat)
+                
+                # Decode
+                recons = []
+                for v in range(self.n_views):
+                    recon = self.decoders[v](features[v])
+                    recons.append(recon)
+                
+                recon_concat = self.concat_decoder(feat_concat)
+                
+                # Fused representation
+                fused = F.normalize(self.fusion(feat_concat), dim=1)
+                
+                # Common representation
+                common_reprs = [F.normalize(self.common_info(feat), dim=1) for feat in features]
+                
+                return features, recons, recon_concat, fused, common_reprs, sparse_acts, X_views
+        
+        # Initialize model
+        model = SparseMVCNetwork(dims, self.feature_dim, self.high_feature_dim, device).to(device)
+        optimizer = Adam(model.parameters(), lr=self.learning_rate, weight_decay=1e-5)
+        criterion_mse = nn.MSELoss()
+        contrastive_criterion = ContrastiveLoss(batch_size, temperature=1.0)
+        
+        # Create data loader
+        dataset = TensorDataset(X_normalized[0] if n_views > 0 else torch.zeros(n_samples, 1))
+        for v in range(1, n_views):
+            # Create a simple wrapper to load all views
+            pass
+        
+        # Pretraining phase
+        print(f"[{self.name}] Pretraining... (0/{self.pre_epochs})", end='', flush=True)
+        for epoch in range(self.pre_epochs):
+            model.train()
+            total_loss = 0.0
+            
+            for batch_idx in range(0, n_samples, batch_size):
+                batch_end = min(batch_idx + batch_size, n_samples)
+                batch_X = [X_normalized[v][batch_idx:batch_end] for v in range(n_views)]
+                
+                optimizer.zero_grad()
+                
+                features, recons, recon_concat, fused, common_reprs, sparse_acts, _ = model(batch_X)
+                
+                # Reconstruction loss
+                recon_loss = sum(criterion_mse(batch_X[v], recons[v]) for v in range(n_views))
+                recon_loss += criterion_mse(torch.cat(batch_X, dim=1), recon_concat)
+                
+                # Sparsity loss
+                sparse_loss_val = torch.tensor(0.0, device=device)
+                for acts_list in sparse_acts:
+                    if acts_list:
+                        sparse_loss_val = sparse_loss_val + kl_sparse_loss(acts_list, self.sparse_rho, self.sparse_beta)
+                
+                loss = recon_loss + sparse_loss_val
+                loss.backward()
+                optimizer.step()
+                
+                total_loss += loss.item()
+            
+            if (epoch + 1) % 50 == 0 or epoch == 0:
+                print(f"\r[{self.name}] Pretraining... ({epoch + 1}/{self.pre_epochs})", end='', flush=True)
+        
+        print(f"\r[{self.name}] Pretraining done!              ")
+        
+        # Main training phase with contrastive loss
+        print(f"[{self.name}] Training... (0/{self.epochs})", end='', flush=True)
+        for epoch in range(self.epochs):
+            model.train()
+            total_loss = 0.0
+            
+            for batch_idx in range(0, n_samples, batch_size):
+                batch_end = min(batch_idx + batch_size, n_samples)
+                batch_X = [X_normalized[v][batch_idx:batch_end] for v in range(n_views)]
+                
+                optimizer.zero_grad()
+                
+                features, recons, recon_concat, fused, common_reprs, sparse_acts, _ = model(batch_X)
+                
+                # Reconstruction loss
+                recon_loss = sum(criterion_mse(batch_X[v], recons[v]) for v in range(n_views))
+                recon_loss += criterion_mse(torch.cat(batch_X, dim=1), recon_concat)
+                
+                # Sparsity loss
+                sparse_loss_val = torch.tensor(0.0, device=device)
+                for acts_list in sparse_acts:
+                    if acts_list:
+                        sparse_loss_val = sparse_loss_val + kl_sparse_loss(acts_list, self.sparse_rho, self.sparse_beta)
+                
+                # Contrastive loss between views
+                contrastive_loss_val = torch.tensor(0.0, device=device)
+                for v in range(n_views):
+                    for u in range(v + 1, n_views):
+                        contrastive_loss_val = contrastive_loss_val + contrastive_criterion(
+                            common_reprs[v], common_reprs[u], weight=1.0 / n_views
+                        )
+                
+                loss = recon_loss + sparse_loss_val + 0.1 * contrastive_loss_val
+                loss.backward()
+                optimizer.step()
+                
+                total_loss += loss.item()
+            
+            if (epoch + 1) % 50 == 0 or epoch == 0:
+                print(f"\r[{self.name}] Training... ({epoch + 1}/{self.epochs})", end='', flush=True)
+        
+        print(f"\r[{self.name}] Training done!              ")
+        
+        # Final clustering
+        model.eval()
+        with torch.no_grad():
+            features, recons, recon_concat, fused, common_reprs, sparse_acts, _ = model(X_normalized)
+        
+        labels = KMeans(n_clusters=k, n_init=10, random_state=self.random_state).fit_predict(
+            fused.cpu().numpy()
+        )
+        
+        return labels
+
+
+class BRIDGEWrapper(BaseExternalMVC):
+    """
+    BRIDGE: A Unified Framework to BRIDGE Complete and Incomplete Deep Multi-View Clustering.
+
+    Paper: "A Unified Framework to BRIDGE Complete and Incomplete Deep Multi-View Clustering under Non-IID Missing Patterns" (ICCV 2025)
+    GitHub: https://github.com/xiaorui-jiang/BRIDGE
+
+    Setup:
+        cd spock/baselines/external
+        git clone https://github.com/xiaorui-jiang/BRIDGE.git
+
+    Notes
+    -----
+    This wrapper uses the core BRIDGE training idea (reconstruction + view alignment)
+    in a self-contained implementation adapted to SPOCK data interfaces.
+    """
+
+    def __init__(self, n_clusters, feature_dim=512, high_feature_dim=128,
+                 pretrain_epochs=100, epochs=200, learning_rate=3e-4,
+                 batch_size=256, temperature=0.5, bridge_lambda=0.2,
+                 device='auto', random_state=None):
+        super().__init__(n_clusters, device, random_state)
+        self.feature_dim = feature_dim
+        self.high_feature_dim = high_feature_dim
+        self.pretrain_epochs = pretrain_epochs
+        self.epochs = epochs
+        self.learning_rate = learning_rate
+        self.batch_size = batch_size
+        self.temperature = temperature
+        self.bridge_lambda = bridge_lambda
+        self.name = 'BRIDGE'
+
+    def _get_external_paths(self):
+        return ['BRIDGE', 'bridge']
+
+    def _run_external(self, X_views):
+        import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+        from sklearn.cluster import KMeans
+        from sklearn.preprocessing import normalize
+
+        device = torch.device(self.device)
+        n_views = len(X_views)
+        n_samples = X_views[0].shape[0]
+        dims = [x.shape[1] for x in X_views]
+        k = self.n_clusters
+        batch_size = min(self.batch_size, n_samples)
+
+        X_normalized = []
+        for x in X_views:
+            x_norm = normalize(x, norm='l2').astype(np.float32)
+            X_normalized.append(torch.FloatTensor(x_norm).to(device))
+
+        class Encoder(nn.Module):
+            def __init__(self, input_dim, feature_dim):
+                super().__init__()
+                self.net = nn.Sequential(
+                    nn.Linear(input_dim, 500), nn.ReLU(),
+                    nn.Linear(500, 500), nn.ReLU(),
+                    nn.Linear(500, 2000), nn.ReLU(),
+                    nn.Linear(2000, feature_dim)
+                )
+
+            def forward(self, x):
+                return self.net(x)
+
+        class Decoder(nn.Module):
+            def __init__(self, input_dim, feature_dim):
+                super().__init__()
+                self.net = nn.Sequential(
+                    nn.Linear(feature_dim, 2000), nn.ReLU(),
+                    nn.Linear(2000, 500), nn.ReLU(),
+                    nn.Linear(500, 500), nn.ReLU(),
+                    nn.Linear(500, input_dim)
+                )
+
+            def forward(self, z):
+                return self.net(z)
+
+        class BridgeNet(nn.Module):
+            def __init__(self, input_dims, feature_dim, high_feature_dim, n_clusters):
+                super().__init__()
+                self.n_views = len(input_dims)
+                self.encoders = nn.ModuleList([Encoder(d, feature_dim) for d in input_dims])
+                self.decoders = nn.ModuleList([Decoder(d, feature_dim) for d in input_dims])
+                self.feature_head = nn.Linear(feature_dim, high_feature_dim)
+                self.label_head = nn.Sequential(nn.Linear(feature_dim, n_clusters), nn.Softmax(dim=1))
+
+            def forward(self, xs):
+                hs, qs, xrs, zs = [], [], [], []
+                for v in range(self.n_views):
+                    z = self.encoders[v](xs[v])
+                    h = F.normalize(self.feature_head(z), dim=1)
+                    q = self.label_head(z)
+                    xr = self.decoders[v](z)
+                    hs.append(h)
+                    qs.append(q)
+                    xrs.append(xr)
+                    zs.append(z)
+                return hs, qs, xrs, zs
+
+        def info_nce(h1, h2, temperature):
+            h1 = F.normalize(h1, dim=1)
+            h2 = F.normalize(h2, dim=1)
+            logits = (h1 @ h2.T) / temperature
+            labels = torch.arange(h1.size(0), device=h1.device)
+            loss12 = F.cross_entropy(logits, labels)
+            loss21 = F.cross_entropy(logits.T, labels)
+            return 0.5 * (loss12 + loss21)
+
+        model = BridgeNet(dims, self.feature_dim, self.high_feature_dim, k).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
+        mse = nn.MSELoss()
+
+        # Phase 1: reconstruction pretraining
+        for _ in range(self.pretrain_epochs):
+            model.train()
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                xb = [X_normalized[v][start:end] for v in range(n_views)]
+                _, _, xrs, _ = model(xb)
+                recon_loss = sum(mse(xb[v], xrs[v]) for v in range(n_views))
+                optimizer.zero_grad()
+                recon_loss.backward()
+                optimizer.step()
+
+        # Phase 2: bridge training
+        for _ in range(self.epochs):
+            model.train()
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                xb = [X_normalized[v][start:end] for v in range(n_views)]
+                hs, qs, xrs, _ = model(xb)
+
+                recon_loss = sum(mse(xb[v], xrs[v]) for v in range(n_views))
+
+                contrast_loss = torch.tensor(0.0, device=device)
+                pair_count = 0
+                for i in range(n_views):
+                    for j in range(i + 1, n_views):
+                        contrast_loss = contrast_loss + info_nce(hs[i], hs[j], self.temperature)
+                        pair_count += 1
+                if pair_count > 0:
+                    contrast_loss = contrast_loss / pair_count
+
+                q_mean = torch.stack(qs, dim=0).mean(dim=0).detach()
+                bridge_loss = torch.tensor(0.0, device=device)
+                for qv in qs:
+                    bridge_loss = bridge_loss + F.kl_div(
+                        torch.log(torch.clamp(qv, min=1e-10)),
+                        torch.clamp(q_mean, min=1e-10),
+                        reduction='batchmean'
+                    )
+                bridge_loss = bridge_loss / max(n_views, 1)
+
+                loss = recon_loss + contrast_loss + self.bridge_lambda * bridge_loss
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+        # Final clustering on concatenated latent representations
+        model.eval()
+        with torch.no_grad():
+            _, _, _, zs = model(X_normalized)
+        z_concat = torch.cat(zs, dim=1).cpu().numpy()
+        labels = KMeans(n_clusters=k, n_init=50, random_state=self.random_state).fit_predict(z_concat)
+        return labels
+
+
+class PROTOCOLWrapper(BaseExternalMVC):
+    """
+    PROTOCOL: A Unified Framework for Protocol-based Multi-View Clustering.
+
+    Paper: "PROTOCOL" (NeurIPS 2024)
+    GitHub: https://github.com/Scarlett125/PROTOCOL
+
+    Setup:
+        cd spock/baselines/external
+        git clone https://github.com/Scarlett125/PROTOCOL.git
+
+    Notes
+    -----
+    This wrapper uses the core PROTOCOL training idea (three-stage training with
+    view fusion and alignment) in a self-contained implementation.
+    Three stages: reconstruction pretraining → alignment finetuning → imbalance-aware training.
+    """
+
+    def __init__(self, n_clusters, low_feature_dim=512, high_feature_dim=128,
+                 pretrain_epochs=200, align_epochs=100, imbalance_epochs=100,
+                 learning_rate=3e-4, batch_size=256, temperature_f=0.5,
+                 temperature_l=1.0, device='auto', random_state=None):
+        super().__init__(n_clusters, device, random_state)
+        self.low_feature_dim = low_feature_dim
+        self.high_feature_dim = high_feature_dim
+        self.pretrain_epochs = pretrain_epochs
+        self.align_epochs = align_epochs
+        self.imbalance_epochs = imbalance_epochs
+        self.learning_rate = learning_rate
+        self.batch_size = batch_size
+        self.temperature_f = temperature_f
+        self.temperature_l = temperature_l
+        self.name = 'PROTOCOL'
+
+    def _get_external_paths(self):
+        return ['PROTOCOL', 'protocol']
+
+    def _run_external(self, X_views):
+        import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+        from sklearn.cluster import KMeans
+        from sklearn.preprocessing import normalize
+
+        device = torch.device(self.device)
+        n_views = len(X_views)
+        n_samples = X_views[0].shape[0]
+        dims = [x.shape[1] for x in X_views]
+        k = self.n_clusters
+        batch_size = min(self.batch_size, n_samples)
+
+        X_normalized = []
+        for x in X_views:
+            x_norm = normalize(x, norm='l2').astype(np.float32)
+            X_normalized.append(torch.FloatTensor(x_norm).to(device))
+
+        class Encoder(nn.Module):
+            def __init__(self, input_dim, feature_dim):
+                super().__init__()
+                self.net = nn.Sequential(
+                    nn.Linear(input_dim, 500), nn.ReLU(),
+                    nn.Linear(500, 500), nn.ReLU(),
+                    nn.Linear(500, 2000), nn.ReLU(),
+                    nn.Linear(2000, feature_dim)
+                )
+
+            def forward(self, x):
+                return self.net(x)
+
+        class Decoder(nn.Module):
+            def __init__(self, input_dim, feature_dim):
+                super().__init__()
+                self.net = nn.Sequential(
+                    nn.Linear(feature_dim, 2000), nn.ReLU(),
+                    nn.Linear(2000, 500), nn.ReLU(),
+                    nn.Linear(500, 500), nn.ReLU(),
+                    nn.Linear(500, input_dim)
+                )
+
+            def forward(self, z):
+                return self.net(z)
+
+        class ViewWeight(nn.Module):
+            def __init__(self, num_views, feature_dim):
+                super().__init__()
+                self.fc_layers = nn.ModuleList([
+                    nn.Sequential(nn.Linear(feature_dim, feature_dim), nn.LeakyReLU(0.01))
+                    for _ in range(num_views)
+                ])
+                self.alpha = nn.Parameter(torch.full((num_views,), 1.0 / num_views))
+
+            def forward(self, Z_list):
+                alpha_norm = F.softmax(self.alpha, dim=0)
+                U = torch.zeros_like(Z_list[0])
+                for v, Z_v in enumerate(Z_list):
+                    U = U + alpha_norm[v] * self.fc_layers[v](Z_v)
+                return U, alpha_norm
+
+        class ProtocolNet(nn.Module):
+            def __init__(self, input_dims, low_feature_dim, high_feature_dim, n_clusters):
+                super().__init__()
+                self.n_views = len(input_dims)
+                self.encoders = nn.ModuleList([Encoder(d, low_feature_dim) for d in input_dims])
+                self.decoders = nn.ModuleList([Decoder(d, low_feature_dim) for d in input_dims])
+                self.view_weights = ViewWeight(self.n_views, low_feature_dim)
+                self.feature_head = nn.Linear(low_feature_dim, high_feature_dim)
+                self.label_head = nn.Sequential(
+                    nn.Linear(low_feature_dim, n_clusters),
+                    nn.Softmax(dim=1)
+                )
+                self.label_head_high = nn.Sequential(
+                    nn.Linear(high_feature_dim, n_clusters),
+                    nn.Softmax(dim=1)
+                )
+
+            def forward(self, xs):
+                xrs, zs, hs, qls = [], [], [], []
+                for v in range(self.n_views):
+                    z = self.encoders[v](xs[v])
+                    h = F.normalize(self.feature_head(z), dim=1)
+                    ql = self.label_head(z)
+                    xr = self.decoders[v](z)
+                    xrs.append(xr)
+                    zs.append(z)
+                    hs.append(h)
+                    qls.append(ql)
+                return xrs, zs, hs, qls
+
+            def forward_fusion(self, xs):
+                zs = []
+                for v in range(self.n_views):
+                    z = self.encoders[v](xs[v])
+                    zs.append(z)
+                # View fusion: weighted consensus
+                commonz, weights = self.view_weights(zs)
+                commonz_high = F.normalize(self.feature_head(commonz), dim=1)
+                commonz_qhs = self.label_head_high(commonz_high)
+                return commonz, commonz_qhs, weights, zs
+
+        def contrast_loss(h1, h2, temperature):
+            h1 = F.normalize(h1, dim=1)
+            h2 = F.normalize(h2, dim=1)
+            logits = (h1 @ h2.T) / temperature
+            labels = torch.arange(h1.size(0), device=h1.device)
+            loss12 = F.cross_entropy(logits, labels)
+            loss21 = F.cross_entropy(logits.T, labels)
+            return 0.5 * (loss12 + loss21)
+
+        model = ProtocolNet(dims, self.low_feature_dim, self.high_feature_dim, k).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
+        mse = nn.MSELoss()
+
+        # Stage 1: Reconstruction pretraining
+        for epoch in range(self.pretrain_epochs):
+            model.train()
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                xb = [X_normalized[v][start:end] for v in range(n_views)]
+                xrs, _, _, _ = model(xb)
+                recon_loss = sum(mse(xb[v], xrs[v]) for v in range(n_views))
+                optimizer.zero_grad()
+                recon_loss.backward()
+                optimizer.step()
+
+        # Stage 2: Alignment finetuning
+        for epoch in range(self.align_epochs):
+            model.train()
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                xb = [X_normalized[v][start:end] for v in range(n_views)]
+                xrs, zs, hs, qls = model(xb)
+                commonz, commonz_qhs, weights, _ = model.forward_fusion(xb)
+
+                loss = torch.tensor(0.0, device=device)
+                weight_factor = 2.0 / (n_views * (n_views - 1)) if n_views > 1 else 1.0
+
+                for v in range(n_views):
+                    loss = loss + weight_factor * contrast_loss(hs[v], commonz, self.temperature_f)
+                    loss = loss + weight_factor * F.kl_div(
+                        F.log_softmax(qls[v], dim=1),
+                        F.softmax(commonz_qhs, dim=1).detach(),
+                        reduction='batchmean'
+                    )
+                    loss = loss + mse(xb[v], xrs[v])
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+        # Stage 3: Imbalance-aware training
+        for epoch in range(self.imbalance_epochs):
+            model.train()
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                xb = [X_normalized[v][start:end] for v in range(n_views)]
+                xrs, zs, hs, qls = model(xb)
+                commonz, commonz_qhs, weights, _ = model.forward_fusion(xb)
+
+                loss = torch.tensor(0.0, device=device)
+                weight_factor = 2.0 / (n_views * (n_views - 1)) if n_views > 1 else 1.0
+
+                for v in range(n_views):
+                    loss = loss + weight_factor * contrast_loss(hs[v], commonz, self.temperature_f)
+                    loss = loss + weight_factor * F.kl_div(
+                        F.log_softmax(qls[v], dim=1),
+                        F.softmax(commonz_qhs, dim=1).detach(),
+                        reduction='batchmean'
+                    )
+                    loss = loss + mse(xb[v], xrs[v])
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+        # Final clustering on concatenated latent representations
+        model.eval()
+        with torch.no_grad():
+            zs_all = []
+            for start in range(0, n_samples, batch_size):
+                end = min(start + batch_size, n_samples)
+                xb = [X_normalized[v][start:end] for v in range(n_views)]
+                _, zs, _, _ = model(xb)
+                zs_all.append(torch.cat(zs, dim=1))
+            z_concat = torch.cat(zs_all, dim=0).cpu().numpy()
+
+        labels = KMeans(n_clusters=k, n_init=50, random_state=self.random_state).fit_predict(z_concat)
+        return labels
+
+
 # Registry of external methods
 EXTERNAL_METHODS = {
     'SCMVC': SCMVCWrapper,
@@ -2315,6 +3057,9 @@ EXTERNAL_METHODS = {
     'RCAGL': RCAGLWrapper,
     'ROLL': ROLLWrapper,
     'DMAC': DMACWrapper,
+    'SparseMVC': SparseMVCWrapper,
+    'BRIDGE': BRIDGEWrapper,
+    'PROTOCOL': PROTOCOLWrapper,
 }
 
 
@@ -2432,6 +3177,38 @@ def list_external_methods():
             'setup': f'cd {EXTERNAL_DIR} && git clone https://github.com/sunyuan-cs/2025-CVPR-ROLL.git',
             'requirements': ['torch>=1.5.0', 'scikit-learn', 'munkres'],
             'note': 'Handles noisy correspondences. Python implementation provided.',
+        },
+        'DMAC': {
+            'name': 'Towards Learnable Anchor for Deep Multi-View Clustering',
+            'paper': 'AAAI 2025',
+            'github': 'https://github.com/drongwbc/DMAC-AAAI25',
+            'setup': f'cd {EXTERNAL_DIR} && git clone https://github.com/drongwbc/DMAC-AAAI25.git',
+            'requirements': ['torch>=2.0.0', 'numpy', 'scikit-learn', 'scipy'],
+            'note': 'Anchor-based deep MVC with adaptive anchor learning.',
+        },
+        'SparseMVC': {
+            'name': 'SparseMVC: Probing Cross-view Sparsity Variations for MVC',
+            'paper': 'NeurIPS 2025 Spotlight',
+            'github': 'https://github.com/cleste-pome/SparseMVC',
+            'setup': f'cd {EXTERNAL_DIR} && git clone https://github.com/cleste-pome/SparseMVC.git',
+            'requirements': ['torch>=1.13.1', 'numpy', 'scikit-learn', 'scipy'],
+            'note': 'Adaptive sparse encoding and cross-view alignment.',
+        },
+        'BRIDGE': {
+            'name': 'A Unified Framework to BRIDGE Complete and Incomplete DMVC',
+            'paper': 'ICCV 2025',
+            'github': 'https://github.com/xiaorui-jiang/BRIDGE',
+            'setup': f'cd {EXTERNAL_DIR} && git clone https://github.com/xiaorui-jiang/BRIDGE.git',
+            'requirements': ['torch>=1.10.0', 'numpy', 'scikit-learn', 'scipy'],
+            'note': 'Bridges complete and incomplete multi-view clustering.',
+        },
+        'PROTOCOL': {
+            'name': 'PROTOCOL',
+            'paper': 'NeurIPS 2024',
+            'github': 'https://github.com/Scarlett125/PROTOCOL',
+            'setup': f'cd {EXTERNAL_DIR} && git clone https://github.com/Scarlett125/PROTOCOL.git',
+            'requirements': ['torch>=1.12.0', 'numpy', 'scikit-learn', 'scipy'],
+            'note': 'Three-stage protocol-based optimization with view fusion.',
         },
     }
 
